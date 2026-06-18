@@ -12,7 +12,7 @@ pub struct FrameBudget {
 
 #[derive(Debug)]
 pub struct FramePermit {
-    _permit: OwnedSemaphorePermit,
+    permit: OwnedSemaphorePermit,
     frames: usize,
 }
 
@@ -48,9 +48,36 @@ impl FrameBudget {
             .await
             .map_err(|_| FrameBudgetError::Closed)?;
         Ok(FramePermit {
-            _permit: permit,
+            permit,
             frames: frames as usize,
         })
+    }
+
+    pub fn try_reserve(&self, frames: usize) -> Result<FramePermit, FrameBudgetError> {
+        self.validate_reservation(frames)?;
+        let frames = u32::try_from(frames).map_err(|_| FrameBudgetError::TooManyFrames(frames))?;
+        let permit = self
+            .permits
+            .clone()
+            .try_acquire_many_owned(frames)
+            .map_err(|_| FrameBudgetError::Unavailable)?;
+        Ok(FramePermit {
+            permit,
+            frames: frames as usize,
+        })
+    }
+
+    fn validate_reservation(&self, frames: usize) -> Result<(), FrameBudgetError> {
+        if frames == 0 {
+            return Err(FrameBudgetError::ZeroReservation);
+        }
+        if frames > self.capacity {
+            return Err(FrameBudgetError::ReservationExceedsCapacity {
+                requested: frames,
+                capacity: self.capacity,
+            });
+        }
+        Ok(())
     }
 
     pub const fn capacity(&self) -> usize {
@@ -66,6 +93,20 @@ impl FramePermit {
     pub const fn frames(&self) -> usize {
         self.frames
     }
+
+    pub fn merge(&mut self, other: Self) {
+        self.frames += other.frames;
+        self.permit.merge(other.permit);
+    }
+
+    pub fn shrink_to(&mut self, frames: usize) {
+        let released = self.frames.saturating_sub(frames);
+        if released == 0 {
+            return;
+        }
+        drop(self.permit.split(released));
+        self.frames -= released;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +116,7 @@ pub enum FrameBudgetError {
     TooManyFrames(usize),
     ReservationExceedsCapacity { requested: usize, capacity: usize },
     Closed,
+    Unavailable,
 }
 
 impl fmt::Display for FrameBudgetError {
@@ -91,6 +133,7 @@ impl fmt::Display for FrameBudgetError {
                 "reservation of {requested} frames exceeds capacity of {capacity} frames"
             ),
             Self::Closed => f.write_str("frame budget is closed"),
+            Self::Unavailable => f.write_str("frame budget is currently unavailable"),
         }
     }
 }
@@ -109,5 +152,17 @@ mod tests {
         assert_eq!(budget.available(), 1);
         drop(permit);
         assert_eq!(budget.available(), 3);
+    }
+
+    #[test]
+    fn permits_can_grow_and_shrink() {
+        let budget = FrameBudget::new(3).unwrap();
+        let mut permit = budget.try_reserve(1).unwrap();
+        permit.merge(budget.try_reserve(2).unwrap());
+        assert_eq!(budget.available(), 0);
+
+        permit.shrink_to(1);
+        assert_eq!(permit.frames(), 1);
+        assert_eq!(budget.available(), 2);
     }
 }

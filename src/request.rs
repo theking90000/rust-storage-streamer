@@ -45,15 +45,18 @@ pub struct ObjectMeta {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StreamRequest {
     frames: Range<u64>,
-    max_rate: FrameRate,
+    allocated_rate: FrameRate,
 }
 
 impl StreamRequest {
-    pub fn new(frames: Range<u64>, max_rate: FrameRate) -> Result<Self, RequestError> {
+    pub fn new(frames: Range<u64>, allocated_rate: FrameRate) -> Result<Self, RequestError> {
         if frames.start >= frames.end {
             return Err(RequestError::EmptyFrameRange);
         }
-        Ok(Self { frames, max_rate })
+        Ok(Self {
+            frames,
+            allocated_rate,
+        })
     }
 
     pub fn frames(&self) -> Range<u64> {
@@ -64,12 +67,8 @@ impl StreamRequest {
         self.frames.end - self.frames.start
     }
 
-    pub const fn max_rate(&self) -> FrameRate {
-        self.max_rate
-    }
-
-    pub fn target_rate(&self, memory_safe_rate: FrameRate, consumer_rate: FrameRate) -> FrameRate {
-        self.max_rate.min(memory_safe_rate).min(consumer_rate)
+    pub const fn allocated_rate(&self) -> FrameRate {
+        self.allocated_rate
     }
 }
 
@@ -95,12 +94,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn target_rate_is_the_smallest_limit() {
+    fn keeps_the_allocated_rate() {
         let request = StreamRequest::new(0..10, FrameRate::new(763.0).unwrap()).unwrap();
-        let target = request.target_rate(
-            FrameRate::new(900.0).unwrap(),
-            FrameRate::new(500.0).unwrap(),
-        );
-        assert_eq!(target.frames_per_second(), 500.0);
+        assert_eq!(request.allocated_rate().frames_per_second(), 763.0);
     }
 }
