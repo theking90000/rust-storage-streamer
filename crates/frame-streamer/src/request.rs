@@ -119,4 +119,12 @@ mod tests {
         let request = StreamRequest::new(0..10, FrameRate::new(763.0).unwrap()).unwrap();
         assert_eq!(request.allocated_rate().frames_per_second(), 763.0);
     }
+
+    #[test]
+    fn redacts_decryption_keys() {
+        assert_eq!(
+            format!("{:?}", DecryptKey::new([7; 32])),
+            "DecryptKey([REDACTED])"
+        );
+    }
 }

@@ -158,14 +158,22 @@ async fn main() -> Result<(), BoxError> {
     println!("window: {:?}", x);
 
     let session = StreamSession::new(objects, backend, request, budget, config)?;
-    let output = tokio::fs::File::create("output.bin").await?.into_sink();
     let start = std::time::Instant::now();
 
-    /*match tokio::time::timeout(Duration::from_secs(10), session.pipe_into(output)).await {
-        Ok(result) => result?,
-        Err(_) => println!("demo complete: output stayed blocked while the frame window filled"),
-    }*/
-    session.pipe_into(output).await?;
+    if std::env::args().any(|arg| arg == "--blocked") {
+        let output = OneFrameOutput { buffered: None };
+        match tokio::time::timeout(Duration::from_secs(10), session.pipe_into(output)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                println!("demo complete: output stayed blocked while the frame window filled")
+            }
+        }
+        return Ok(());
+    }
+
+    session
+        .pipe_into(tokio::fs::File::create("output.bin").await?.into_sink())
+        .await?;
     println!(
         "demo complete: downloaded {} frames in {:.2}s",
         total_frames,

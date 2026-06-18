@@ -143,6 +143,7 @@ pub struct ObjectPlan {
     authorized: u32,
     received: u32,
     emitted: u32,
+    finished: bool,
     buffer: VecDeque<Bytes>,
 }
 
@@ -356,6 +357,7 @@ impl StreamSession {
                 authorized: first_frame,
                 received: first_frame,
                 emitted: first_frame,
+                finished: false,
                 buffer: VecDeque::new(),
             });
         }
@@ -427,7 +429,9 @@ impl StreamSession {
         let mut progressed = false;
 
         for plan in &mut self.plans {
-            if plan.received == plan.authorized {
+            if plan.finished
+                || (plan.received == plan.authorized && plan.received < plan.local_frames.end)
+            {
                 continue;
             }
             let Some(download) = &mut plan.download else {
@@ -435,13 +439,22 @@ impl StreamSession {
             };
             match download.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(frame))) => {
+                    if plan.received == plan.local_frames.end {
+                        return Poll::Ready(Err(message(
+                            "object returned more frames than requested",
+                        )));
+                    }
                     plan.buffer.push_back(frame);
                     plan.received += 1;
                     progressed = true;
                 }
                 Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error)),
                 Poll::Ready(None) => {
-                    return Poll::Ready(Err(message("object ended before its last frame")));
+                    if plan.received != plan.local_frames.end {
+                        return Poll::Ready(Err(message("object ended before its last frame")));
+                    }
+                    plan.finished = true;
+                    progressed = true;
                 }
                 Poll::Pending => {}
             }
@@ -453,13 +466,23 @@ impl StreamSession {
         let plan = self.plans.front_mut()?;
         let frame = plan.buffer.pop_front()?;
         plan.emitted += 1;
-        if plan.emitted == plan.local_frames.end {
+        if plan.emitted == plan.local_frames.end && plan.finished {
             self.plans.pop_front();
         }
         let committed: usize = self.plans.iter().map(ObjectPlan::committed).sum();
         self.allocation
             .shrink_to(self.capacity_frames().max(committed));
         Some(frame)
+    }
+
+    fn discard_finished(&mut self) {
+        while self
+            .plans
+            .front()
+            .is_some_and(|plan| plan.finished && plan.emitted == plan.local_frames.end)
+        {
+            self.plans.pop_front();
+        }
     }
 
     fn poll_fill(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), BoxError>> {
@@ -476,6 +499,7 @@ impl StreamSession {
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Pending => false,
         };
+        self.discard_finished();
 
         if self.plans.is_empty()
             && (self.objects.is_terminated() || self.source_cursor >= self.request.frames().end)
@@ -628,9 +652,9 @@ mod tests {
             physical_bytes: Range<u64>,
         ) -> EncryptedByteStream {
             *self.requested.lock().unwrap() = Some(physical_bytes.clone());
-            let selected = self
-                .body
-                .slice(physical_bytes.start as usize..physical_bytes.end as usize);
+            let selected = self.body.slice(
+                physical_bytes.start as usize..(physical_bytes.end as usize).min(self.body.len()),
+            );
             let chunks = selected
                 .chunks(5)
                 .map(|chunk| Ok(Bytes::copy_from_slice(chunk)))
@@ -754,6 +778,27 @@ mod tests {
 
         assert_eq!(*raw.requested.lock().unwrap(), Some(24..48));
         assert_eq!(frames, [Bytes::from_static(b"frame-1!")]);
+    }
+
+    #[tokio::test]
+    async fn decrypting_backend_rejects_an_incomplete_response() {
+        let object = object(7, 2);
+        let mut body = Vec::new();
+        body.extend(encrypted_frame(&object.decrypt_key, 0, b"frame-0!"));
+        body.extend(encrypted_frame(&object.decrypt_key, 1, b"frame-1!"));
+        body.pop();
+        let raw = Arc::new(RawBackend {
+            body: Bytes::from(body),
+            requested: Mutex::new(None),
+        });
+        let backend = StreamBackend::new(raw, 24).unwrap();
+
+        let error = FrameBackend::download(&backend, &object, "url".into(), 1..2)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("incomplete frame"));
     }
 
     #[test]
