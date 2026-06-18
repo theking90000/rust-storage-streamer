@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use download::CatalogDownloadBackend;
 
+use catalog::CompletedFile;
 pub use catalog::{Catalog, CatalogError};
 
 #[derive(Clone, Copy, Debug)]
@@ -78,7 +79,7 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/files", post(create_file))
-        .route("/files/{id}", get(download_file))
+        .route("/files/{id}", get(download_file).head(head_file))
         .route("/files/{id}/segments/{index}", put(upload_segment))
         .route("/files/{id}/complete", post(complete_file))
         .with_state(state)
@@ -216,6 +217,18 @@ async fn complete_file(
     }))
 }
 
+async fn head_file(
+    State(state): State<AppState>,
+    Path(file_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let file = state.catalog.completed_file(&file_id).await?;
+    let range = parse_range(headers.get(header::RANGE), file.size)?;
+    file_response(&file, &range)
+        .body(Body::empty())
+        .map_err(ApiError::internal)
+}
+
 async fn download_file(
     State(state): State<AppState>,
     Path(file_id): Path<String>,
@@ -223,29 +236,10 @@ async fn download_file(
 ) -> Result<Response, ApiError> {
     let file = state.catalog.completed_file(&file_id).await?;
     let size = file.size;
-    let objects = file.objects;
     let range = parse_range(headers.get(header::RANGE), size)?;
-    let partial = range != (0..size);
     let length = range.end - range.start;
-    let mut builder = Response::builder()
-        .status(if partial {
-            StatusCode::PARTIAL_CONTENT
-        } else {
-            StatusCode::OK
-        })
-        .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::CONTENT_LENGTH, length.to_string())
-        .header(header::CONTENT_TYPE, file.content_type)
-        .header(
-            header::CONTENT_DISPOSITION,
-            content_disposition(&file.name),
-        );
-    if partial {
-        builder = builder.header(
-            header::CONTENT_RANGE,
-            format!("bytes {}-{}/{}", range.start, range.end - 1, size),
-        );
-    }
+    let builder = file_response(&file, &range);
+    let objects = file.objects;
     if length == 0 {
         return builder.body(Body::empty()).map_err(ApiError::internal);
     }
@@ -278,6 +272,30 @@ async fn download_file(
             tokio_stream::wrappers::ReceiverStream::new(receiver),
         ))
         .map_err(ApiError::internal)
+}
+
+/// Builds the response head (status + metadata headers) shared by `GET` and
+/// `HEAD`, leaving only the body for the caller to attach.
+fn file_response(file: &CompletedFile, range: &Range<u64>) -> axum::http::response::Builder {
+    let partial = *range != (0..file.size);
+    let length = range.end - range.start;
+    let mut builder = Response::builder()
+        .status(if partial {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        })
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, length.to_string())
+        .header(header::CONTENT_TYPE, file.content_type.clone())
+        .header(header::CONTENT_DISPOSITION, content_disposition(&file.name));
+    if partial {
+        builder = builder.header(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{}/{}", range.start, range.end - 1, file.size),
+        );
+    }
+    builder
 }
 
 fn parse_range(value: Option<&HeaderValue>, size: u64) -> Result<Range<u64>, ApiError> {
@@ -326,7 +344,7 @@ fn range_error(size: u64) -> ApiError {
     error
 }
 
-/// Builds an `attachment` Content-Disposition with an ASCII-safe `filename`
+/// Builds an `inline` Content-Disposition with an ASCII-safe `filename`
 /// and an RFC 5987 `filename*` carrying the exact UTF-8 name.
 fn content_disposition(name: &str) -> String {
     let ascii: String = name
@@ -824,12 +842,46 @@ mod tests {
         assert_eq!(response.headers()[header::CONTENT_TYPE], "text/plain");
         assert_eq!(
             response.headers()[header::CONTENT_DISPOSITION],
-            "attachment; filename=\"test.bin\"; filename*=UTF-8''test.bin"
+            "inline; filename=\"test.bin\"; filename*=UTF-8''test.bin"
         );
         assert_eq!(
             response.into_body().collect().await.unwrap().to_bytes(),
             "abcdefghijk"
         );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::head(format!("/files/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "11");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "text/plain");
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(
+            response.headers()[header::CONTENT_DISPOSITION],
+            "inline; filename=\"test.bin\"; filename*=UTF-8''test.bin"
+        );
+        assert!(response.into_body().collect().await.unwrap().to_bytes().is_empty());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::head(format!("/files/{id}"))
+                    .header(header::RANGE, "bytes=2-8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "7");
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 2-8/11");
+        assert!(response.into_body().collect().await.unwrap().to_bytes().is_empty());
 
         let response = app
             .clone()
