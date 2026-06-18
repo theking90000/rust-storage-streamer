@@ -27,11 +27,15 @@
 
 <h1>Rust Storage Streamer</h1>
 <p id="desc">
-  This page is an interface for discord-storage-streamer, a small Rust
-  application that uses Discord webhooks as a storage backend. Every file sent
-  is uploaded chunk by chunk, encrypted, and stored inside a Discord webhook
-  message. Files can be downloaded sequentially at very high throughput
-  (targeting 60 MB/s) and support HTTP Content-Range.
+  This page is an interface for
+  <a
+    target="_blank"
+    href="https://github.com/theking90000/rust-storage-streamer"
+    >rust-storage-streamer</a
+  >, a small Rust application that uses Discord webhooks as a storage backend.
+  Every file sent is uploaded chunk by chunk, encrypted, and stored inside a
+  Discord webhook message. Files can be downloaded sequentially at very high
+  throughput (targeting 60 MB/s) and support HTTP Content-Range.
 </p>
 <input type="file" id="file" />
 <div id="status"></div>
@@ -59,7 +63,7 @@
     let segments = 0;
     const timer = setInterval(() => {
       const now = performance.now();
-      const mbps = ((uploadedBytes - lastBytes) / (now - lastTime)) / 1e3;
+      const mbps = (uploadedBytes - lastBytes) / (now - lastTime) / 1e3;
       lastBytes = uploadedBytes;
       lastTime = now;
       const pct = (uploadedBytes / f.size) * 100;
@@ -125,7 +129,9 @@
             break;
           } catch (e) {
             if (attempt >= MAX_RETRIES)
-              throw new Error(`Segment ${i} failed after ${MAX_RETRIES + 1} attempts: ${e.message}`);
+              throw new Error(
+                `Segment ${i} failed after ${MAX_RETRIES + 1} attempts: ${e.message}`,
+              );
             await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
           }
         }
