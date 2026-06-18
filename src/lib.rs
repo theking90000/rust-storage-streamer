@@ -15,6 +15,6 @@ pub use planning::{ObjectReadPlan, PhysicalRange, ReadPlanner};
 pub use request::{ByteRate, ObjectId, ObjectMeta, StreamRequest, StreamRequestError};
 pub use sizing::{WindowSizing, WindowSizingError, WindowSizingInput};
 pub use window::{
-    DownloadState, FrameSlotSnapshot, FrameSlotState, ObjectPlan, PlanId, PlanZones, UrlState,
-    WindowAction, WindowBoundaries, WindowConfig, WindowConfigError, WindowController, WindowError,
+    ObjectPlan, PlanZones, UrlState, WindowAction, WindowBoundaries, WindowConfig,
+    WindowController, WindowError,
 };
