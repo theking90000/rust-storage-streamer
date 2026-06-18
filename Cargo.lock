@@ -86,6 +86,7 @@ dependencies = [
  "futures-util",
  "reqwest",
  "tokio",
+ "tokio-into-sink",
 ]
 
 [[package]]
@@ -910,6 +911,17 @@ dependencies = [
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tokio-into-sink"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "205edfbb818f995900ff51ab7a970183d7dac2fcbe407e427bfcef036d3262f5"
+dependencies = [
+ "futures-sink",
+ "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]

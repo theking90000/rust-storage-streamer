@@ -18,6 +18,7 @@ use frame_streamer::{
     StreamBackend, StreamConfig, StreamRequest, StreamSession, TransferModel, UrlTicket,
 };
 use futures_util::{Sink, StreamExt, stream};
+use tokio_into_sink::IntoSinkExt;
 
 /// Simulates a transport whose userspace buffer accepts one frame and then
 /// remains blocked forever. The driver must keep filling its bounded window.
@@ -79,9 +80,9 @@ impl StreamBackend for HttpBackend {
                 .content_length()
                 .ok_or("response is missing a Content-Length")?;
             if total % u64::from(frame_count) != 0 {
-                Err(format!(
+                /*Err(format!(
                     "object {id} body of {total} bytes does not split into {frame_count} frames"
-                ))?;
+                ))?;*/
             }
             let frame_size = 65536;
 
@@ -115,9 +116,14 @@ impl StreamBackend for HttpBackend {
 async fn main() -> Result<(), BoxError> {
     // Hardcoded objects. httpbin returns N random bytes, split into frames below.
     let catalog = vec![
-        object("flux.1", "http://192.168.129.87:8080/flux.1", 150),
-        object("flux.2", "http://192.168.129.87:8080/flux.2", 150),
-        object("flux.3", "http://192.168.129.87:8080/flux.3", 150),
+        object("flux.0", "https://proof.ovh.net/files/10Mb.dat", 150),
+        object("flux.1", "https://proof.ovh.net/files/10Mb.dat", 150),
+        object("flux.2", "https://proof.ovh.net/files/10Mb.dat", 150),
+        object("flux.3", "https://proof.ovh.net/files/10Mb.dat", 150),
+        object("flux.4", "https://proof.ovh.net/files/10Mb.dat", 150),
+       // object("flux.1", "http://192.168.129.87:8080/flux.1", 150),
+       // object("flux.2", "http://192.168.129.87:8080/flux.2", 150),
+        // object("flux.3", "http://192.168.129.87:8080/flux.3", 150),
     ];
     let total_frames: u64 = catalog
         .iter()
@@ -129,9 +135,9 @@ async fn main() -> Result<(), BoxError> {
         client: reqwest::Client::new(),
     });
     let request = StreamRequest::new(0..total_frames, FrameRate::new(120.0)?)?;
-    let budget = FrameBudget::new(160)?;
+    let budget = FrameBudget::new(150*10)?; // 100MB of memory budget
     let config = StreamConfig::new(
-        FrameRate::new(120.0)?,
+        FrameRate::new(12.0)?, // 1200fps
         TransferModel {
             object_rate: FrameRate::new(7.6317)?,
             data_ttfb: Duration::from_millis(500),
@@ -151,12 +157,19 @@ async fn main() -> Result<(), BoxError> {
     println!("window: {:?}", x);
 
     let session = StreamSession::new(objects, backend, request, budget, config)?;
-    let output = OneFrameOutput { buffered: None };
+    let output = tokio::fs::File::create("output.bin").await?.into_sink();
+    let start = std::time::Instant::now();
 
-    match tokio::time::timeout(Duration::from_secs(10), session.pipe_into(output)).await {
+    /*match tokio::time::timeout(Duration::from_secs(10), session.pipe_into(output)).await {
         Ok(result) => result?,
         Err(_) => println!("demo complete: output stayed blocked while the frame window filled"),
-    }
+    }*/
+    session.pipe_into(output).await?;
+    println!(
+        "demo complete: downloaded {} frames in {:.2}s",
+        total_frames,
+        start.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 

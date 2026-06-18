@@ -15,3 +15,4 @@ futures-util.workspace = true
 async-stream = "0.3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+tokio-into-sink = "0.1.0"
