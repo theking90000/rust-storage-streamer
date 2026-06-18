@@ -5,9 +5,11 @@ mod memory;
 mod pacer;
 mod planning;
 mod request;
+mod sizing;
 
 pub use frame::{FrameAssembler, FrameDecoder, FrameError};
 pub use memory::{MemoryBudget, MemoryBudgetError, MemoryPermit};
 pub use pacer::{OutputPacer, PacerError};
 pub use planning::{ObjectReadPlan, PhysicalRange, ReadPlanner};
 pub use request::{ByteRate, ObjectId, ObjectMeta, StreamRequest, StreamRequestError};
+pub use sizing::{WindowSizing, WindowSizingError, WindowSizingInput};
