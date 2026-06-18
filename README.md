@@ -16,24 +16,17 @@ The crate currently provides:
 - a coarse global memory budget that never exceeds its configured hard limit;
 - a per-stream token-bucket pacer that also handles writes larger than its burst;
 - a sizing policy converting target rates and measured latencies into frame counts;
-- a lazy sliding-window controller with one sequential frame buffer per object;
+- a single-owner `StreamSession` that polls its lazy object source, URL tickets,
+  sequential object downloads, and per-object frame buffers;
 - progressive live resizing: growth immediately extends download rights, while
   shrinkage drains already committed slots before releasing them.
 
-The window controller consumes a `Stream<Item = Result<ObjectMeta, E>>` only as
-far as its URL-prefetch horizon. Its methods return transport-neutral actions:
-
-```text
-FetchUrl
-OpenDownload { full_local_range, authorized_local_end }
-AdvanceDownload { authorized_local_end }
-```
-
-An HTTP integration can stop polling an object's sequential response whenever
-`authorized_local_end` is reached. Objects are never copied between Ready,
-Data, and Prefetch; those zones are calculated as frame-range intersections
-over one `ObjectPlan`. Output simply pops the first buffered frame from the
-front object, so head-of-line blocking remains explicit.
+`StreamSession` implements `Stream<Item = Result<Bytes, BoxError>>` directly.
+It polls an object's URL ticket only after at least one of its frames is
+authorized, and polls each sequential download only up to its authorization.
+Output pops exclusively from the front object's buffer, keeping head-of-line
+ordering explicit without channels, detached tasks, global frame slots, or a
+separate action queue.
 
 Network transport, signed-URL coordination, and concrete cryptography are not
 implemented yet. Their external contracts need to be specified before they can
