@@ -1,149 +1,292 @@
-use std::pin::Pin;
+//! `frame-streamer-cli` — upload a file or a piped stream to a
+//! rust-storage-streamer HTTP backend.
+//!
+//! Mirrors the web UI pipeline: `POST /files` → parallel
+//! `PUT /files/{id}/segments/{index}` → `POST /files/{id}/complete`, then prints
+//! the download URL. The client sends plaintext segments; the server encrypts.
+
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use bytes::Bytes;
-use frame_streamer::{
-    BoxError, ByteRate, ByteRequest, ByteStream, ByteStreamConfig, ByteTransferModel, DecryptKey,
-    FrameBudget, ObjectId, ObjectMeta,
-};
-use futures_util::{Sink, stream};
-use tokio_into_sink::IntoSinkExt;
+use bytes::{Bytes, BytesMut};
+use clap::Parser;
+use frame_streamer::{BoxError, TAG_SIZE};
+use futures_util::{Stream, StreamExt, TryStreamExt};
+use indicatif::{ProgressBar, ProgressStyle};
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
-mod measure;
-use measure::MeasureBackend;
+/// Discord caps each object at 150 frames, so one segment holds at most 150.
+const FRAMES_PER_SEGMENT: usize = 150;
+/// Per-segment upload attempts before giving up (1 try + retries).
+const MAX_RETRIES: u32 = 3;
 
-const FRAME_SIZE: usize = 1 << 16;
-const TOTAL_BYTES: u64 = 27_153_749;
-const OBJECT_RATE: f64 = 60_000_000.0;
-const TARGET_RATE: f64 = OBJECT_RATE * 10.0; // OBJECT_RATE * 3.0;
+#[derive(Parser)]
+#[command(about = "Upload a file or stream to a rust-storage-streamer backend")]
+struct Cli {
+    /// File to upload. Omit to read from stdin (e.g. `cli < file` or a pipe).
+    input: Option<PathBuf>,
+    /// Backend base URL.
+    #[arg(short, long, env = "WD40_BACKEND", default_value = "https://wd40.theking90000.be")]
+    backend: String,
+    /// Number of segments uploaded concurrently.
+    #[arg(short, long, default_value_t = 4)]
+    parallel: usize,
+    /// File name recorded server-side (defaults to the input file name, or `stream`).
+    #[arg(long)]
+    name: Option<String>,
+    /// Content-Type recorded server-side.
+    #[arg(long, default_value = "application/octet-stream")]
+    content_type: String,
+    /// Frame size in bytes. MUST match the server's `frame_size`.
+    #[arg(long, default_value_t = 1 << 16)]
+    frame_size: usize,
+    /// Allocation ceiling for stdin uploads (ignored when a file is given).
+    #[arg(long, default_value_t = 8 * 1024 * 1024 * 1024)]
+    expected_size: u64,
+}
 
-struct OneFrameOutput(Option<Bytes>);
+#[derive(Serialize)]
+struct CreateFile<'a> {
+    name: &'a str,
+    content_type: &'a str,
+    expected_size: u64,
+}
 
-impl Sink<Bytes> for OneFrameOutput {
-    type Error = std::io::Error;
-
-    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.0.is_none() {
-            Poll::Ready(Ok(()))
-        } else {
-            Poll::Pending
-        }
-    }
-
-    fn start_send(mut self: Pin<&mut Self>, bytes: Bytes) -> Result<(), Self::Error> {
-        println!("output accepted {} bytes, then blocked", bytes.len());
-        self.0 = Some(bytes);
-        Ok(())
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Pending
-    }
-
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Pending
-    }
+#[derive(Deserialize)]
+struct FileCreated {
+    id: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
-    let catalog = vec![
-        object(
-            "https://cdn.discordapp.com/attachments/1517138836453589052/1517202414241976441/flux.1?ex=6a356c5b&is=6a341adb&hm=0c586e1001d572690535fffad9298aaba7c6cf09d4b42ae85e290f4158f9e444&",
-            150,
-            "e14c08356134cb311e1ab933c6d3fc421fb43e5fbc97997470cecb4ca5e5a3e3",
-        ),
-        object(
-            "https://cdn.discordapp.com/attachments/1517138836453589052/1517202424052449550/flux.2?ex=6a356c5e&is=6a341ade&hm=09cb534967a77db375bc9ee36eabcd276bfc752d01a26b50c3257bceb0179d76&",
-            150,
-            "45b481e3033561e4f4bd884ce9e875cc932b7d5d94c0a7f22a94bc9305ef7d97",
-        ),
-        object(
-            "https://cdn.discordapp.com/attachments/1517138836453589052/1517202435184005181/flux.3?ex=6a356c60&is=6a341ae0&hm=4b6a0c8c75df92f4598c9edb7bb8c6536dc3d5950c9b80e1daec2a75b38372cf&",
-            115,
-            "688172a63bc45555f6b7565d64f814cb2a95fcdd34c61c3b134b29209926d1b2",
-        ),
-    ];
-    let objects = stream::iter(catalog.into_iter().map(Ok::<_, BoxError>));
-    let backend = Arc::new(MeasureBackend::new(
-        reqwest::Client::new(),
-        "metrics",
-        FRAME_SIZE,
-        TARGET_RATE,
-    ));
-    let config = ByteStreamConfig::new(
-        FRAME_SIZE,
-        ByteRate::new(TARGET_RATE)?,
-        ByteTransferModel {
-            object_rate: ByteRate::new(OBJECT_RATE)?,
-            data_ttfb: Duration::from_millis(100),
-            url_latency: Duration::ZERO,
-            frames_per_object: 150,
-        },
-    )?;
-    let stream = ByteStream::new(
-        objects,
-        backend.clone(),
-        ByteRequest::new(0..TOTAL_BYTES, ByteRate::new(TARGET_RATE)?)?,
-        FrameBudget::new(415)?,
-        config,
-    )?;
-    backend.set_window_frames(stream.capacity_frames());
-    println!(
-        "target={:.3} Mbit/s, window={} frames",
-        TARGET_RATE * 8.0 / 1_000_000.0,
-        stream.capacity_frames()
-    );
-    let start = std::time::Instant::now();
+    let cli = Cli::parse();
+    let base = cli.backend.trim_end_matches('/').to_owned();
+    if cli.frame_size <= TAG_SIZE {
+        return Err(format!("frame-size must be greater than {TAG_SIZE}").into());
+    }
+    let segment_size = (cli.frame_size - TAG_SIZE) * FRAMES_PER_SEGMENT;
 
-    if std::env::args().any(|arg| arg == "--blocked") {
-        match tokio::time::timeout(
-            Duration::from_secs(10),
-            stream.pipe_into(OneFrameOutput(None)),
-        )
-        .await
-        {
-            Ok(result) => result?,
-            Err(_) => {
-                println!("demo complete: output stayed blocked while the frame window filled")
-            }
+    // Resolve input into an async reader plus a known total size when possible.
+    let (reader, total): (Box<dyn AsyncRead + Unpin + Send>, Option<u64>) = match &cli.input {
+        Some(path) => {
+            let file = tokio::fs::File::open(path).await?;
+            let len = file.metadata().await?.len();
+            (Box::new(file), Some(len))
         }
-        return Ok(());
+        None => (Box::new(tokio::io::stdin()), None),
+    };
+    let name = cli.name.clone().unwrap_or_else(|| match &cli.input {
+        Some(path) => path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "stream".to_owned()),
+        None => "stream".to_owned(),
+    });
+
+    let client = reqwest::Client::builder()
+        .pool_idle_timeout(Duration::from_secs(120))
+        .pool_max_idle_per_host(64)
+        .tcp_keepalive(Some(Duration::from_secs(60)))
+        .tcp_nodelay(true)
+        .build()?;
+
+    // Create the file: for a real file the exact length, otherwise the ceiling.
+    let created: FileCreated = {
+        let response = client
+            .post(format!("{base}/files"))
+            .json(&CreateFile {
+                name: &name,
+                content_type: &cli.content_type,
+                expected_size: total.unwrap_or(cli.expected_size),
+            })
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(format!("create failed: {}", response.text().await.unwrap_or_default()).into());
+        }
+        response.json().await?
+    };
+    let id = created.id;
+
+    let total_blocks = total.map(|t| t.div_ceil(segment_size as u64));
+    let uploaded = Arc::new(AtomicU64::new(0));
+    let blocks = Arc::new(AtomicU64::new(0));
+    let progress = make_progress(total);
+
+    // Repaint position + block count on a timer so MB/s stays live even though
+    // each segment only resolves every ~10 MB.
+    let ticker = {
+        let (progress, uploaded, blocks) = (progress.clone(), uploaded.clone(), blocks.clone());
+        tokio::spawn(async move {
+            loop {
+                paint(&progress, &uploaded, &blocks, total_blocks);
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        })
+    };
+
+    // Read segments sequentially; `try_buffer_unordered` keeps `parallel` of them
+    // in flight, which is what bounds read-ahead (and memory) to ~parallel blocks.
+    let segments = segment_stream(reader, segment_size);
+    let uploads = segments
+        .map_ok(|(index, bytes)| {
+            let url = format!("{base}/files/{id}/segments/{index}");
+            upload_segment(client.clone(), url, bytes, cli.frame_size, uploaded.clone(), blocks.clone())
+        })
+        .try_buffer_unordered(cli.parallel);
+    tokio::pin!(uploads);
+    while let Some(result) = uploads.next().await {
+        result?;
     }
 
-    stream
-        .pipe_into(tokio::fs::File::create("output.bin").await?.into_sink())
-        .await?;
-    println!(
-        "wrote {TOTAL_BYTES} plaintext bytes in {:.2}s ({:.3} Mbit/s)",
-        start.elapsed().as_secs_f64(),
-        TOTAL_BYTES as f64 * 8.0 / start.elapsed().as_secs_f64() / 1_000_000.0,
-    );
-    println!("dropped metric samples: {}", backend.dropped_samples());
+    ticker.abort();
+    paint(&progress, &uploaded, &blocks, total_blocks);
+
+    let response = client.post(format!("{base}/files/{id}/complete")).send().await?;
+    if !response.status().is_success() {
+        return Err(format!("complete failed: {}", response.text().await.unwrap_or_default()).into());
+    }
+    progress.finish();
+    println!("{base}/files/{id}");
     Ok(())
 }
 
-fn object(id: &str, frame_count: u32, key: &str) -> ObjectMeta {
-    ObjectMeta {
-        id: ObjectId::new(
-            reqwest::Url::parse(id)
-                .ok()
-                .and_then(|url| url.path_segments()?.next_back().map(str::to_owned))
-                .unwrap_or_else(|| id.to_owned()),
-        ),
-        uri: id.to_owned(),
-        //uri: format!("http://192.168.129.87:8080/{id}"),
-        frame_count,
-        decrypt_key: hex_key(key),
+/// Reads `size`-byte segments from `reader` until EOF, yielding `(index, bytes)`.
+fn segment_stream(
+    mut reader: Box<dyn AsyncRead + Unpin + Send>,
+    size: usize,
+) -> impl Stream<Item = Result<(u32, Bytes), BoxError>> {
+    async_stream::try_stream! {
+        let mut index: u32 = 0;
+        while let Some(bytes) = read_segment(&mut reader, size).await? {
+            yield (index, bytes);
+            index += 1;
+        }
     }
 }
 
-fn hex_key(hex: &str) -> DecryptKey {
-    let mut key = [0; 32];
-    for (index, byte) in key.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap();
+/// Reads up to `size` bytes, returning `None` only at immediate EOF.
+async fn read_segment<R: AsyncRead + Unpin>(reader: &mut R, size: usize) -> std::io::Result<Option<Bytes>> {
+    let mut buf = BytesMut::with_capacity(size);
+    while buf.len() < size {
+        if reader.read_buf(&mut buf).await? == 0 {
+            break;
+        }
     }
-    DecryptKey::new(key)
+    Ok((!buf.is_empty()).then(|| buf.freeze()))
+}
+
+/// Uploads one segment, retrying with exponential backoff. Feeds `uploaded` live
+/// as the body streams; a failed attempt rolls its bytes back so the count stays
+/// honest across retries.
+async fn upload_segment(
+    client: reqwest::Client,
+    url: String,
+    bytes: Bytes,
+    frame_size: usize,
+    uploaded: Arc<AtomicU64>,
+    blocks: Arc<AtomicU64>,
+) -> Result<(), BoxError> {
+    let size = bytes.len() as u64;
+    let mut last_error = String::new();
+    for attempt in 0..=MAX_RETRIES {
+        let counted = Arc::new(AtomicU64::new(0));
+        let body = body_stream(bytes.clone(), frame_size, uploaded.clone(), counted.clone());
+        let result = client.put(&url).body(reqwest::Body::wrap_stream(body)).send().await;
+        match result {
+            Ok(response) if response.status().is_success() => {
+                // Account for any tail bytes the chunker didn't emit before send returned.
+                uploaded.fetch_add(size.saturating_sub(counted.load(Ordering::Relaxed)), Ordering::Relaxed);
+                blocks.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
+            Ok(response) => {
+                uploaded.fetch_sub(counted.load(Ordering::Relaxed), Ordering::Relaxed);
+                let status = response.status();
+                last_error = format!("HTTP {status}: {}", response.text().await.unwrap_or_default());
+            }
+            Err(error) => {
+                uploaded.fetch_sub(counted.load(Ordering::Relaxed), Ordering::Relaxed);
+                last_error = error.to_string();
+            }
+        }
+        if attempt < MAX_RETRIES {
+            tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+        }
+    }
+    Err(format!("{url}: failed after {} attempts: {last_error}", MAX_RETRIES + 1).into())
+}
+
+/// Splits a segment into `frame_size` chunks, tallying bytes as reqwest drains them.
+fn body_stream(
+    bytes: Bytes,
+    frame_size: usize,
+    uploaded: Arc<AtomicU64>,
+    counted: Arc<AtomicU64>,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> {
+    async_stream::stream! {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let end = (offset + frame_size).min(bytes.len());
+            let chunk = bytes.slice(offset..end);
+            let len = chunk.len() as u64;
+            uploaded.fetch_add(len, Ordering::Relaxed);
+            counted.fetch_add(len, Ordering::Relaxed);
+            offset = end;
+            yield Ok(chunk);
+        }
+    }
+}
+
+fn make_progress(total: Option<u64>) -> ProgressBar {
+    match total {
+        Some(total) => {
+            let bar = ProgressBar::new(total);
+            bar.set_style(
+                ProgressStyle::with_template(
+                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] \
+                     {bytes}/{total_bytes} ({bytes_per_sec}, eta {eta}) {msg}",
+                )
+                .unwrap()
+                .progress_chars("#>-"),
+            );
+            bar
+        }
+        None => {
+            let bar = ProgressBar::new_spinner();
+            bar.set_style(
+                ProgressStyle::with_template(
+                    "{spinner:.green} [{elapsed_precise}] {bytes} ({bytes_per_sec}) {msg}",
+                )
+                .unwrap(),
+            );
+            bar
+        }
+    }
+}
+
+fn paint(progress: &ProgressBar, uploaded: &AtomicU64, blocks: &AtomicU64, total_blocks: Option<u64>) {
+    progress.set_position(uploaded.load(Ordering::Relaxed));
+    let done = blocks.load(Ordering::Relaxed);
+    progress.set_message(match total_blocks {
+        Some(total) => format!("{done}/{total} blocks"),
+        None => format!("{done} blocks"),
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reads_full_blocks_then_partial_then_eof() {
+        let mut reader = std::io::Cursor::new(vec![7u8; 2500]);
+        assert_eq!(read_segment(&mut reader, 1000).await.unwrap().unwrap().len(), 1000);
+        assert_eq!(read_segment(&mut reader, 1000).await.unwrap().unwrap().len(), 1000);
+        assert_eq!(read_segment(&mut reader, 1000).await.unwrap().unwrap().len(), 500);
+        assert!(read_segment(&mut reader, 1000).await.unwrap().is_none());
+    }
 }

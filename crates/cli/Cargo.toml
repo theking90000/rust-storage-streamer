@@ -13,6 +13,8 @@ frame-streamer.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 async-stream.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
-tokio-into-sink = "0.1.0"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "io-util", "io-std", "time", "sync"] }
+reqwest.workspace = true
+clap.workspace = true
+serde.workspace = true
+indicatif.workspace = true
