@@ -19,13 +19,12 @@ The crate currently provides:
   available frame budget. Growth extends download rights immediately; shrinkage
   stops new authorization and releases memory as committed frames drain.
 
-`StreamSession` implements `Stream<Item = Result<Bytes, BoxError>>` directly.
-It polls every URL ticket inside the prefetch window, but opens an object's
-download only after at least one frame is authorized. Each sequential download
-is then polled only up to that authorization.
-Output pops exclusively from the front object's buffer, keeping head-of-line
-ordering explicit without channels, detached tasks, global frame slots, or a
-separate action queue.
+`StreamSession::pipe_into(sink)` returns a `StreamDriver` future owning both the
+session and its output. It keeps polling every URL ticket and authorized
+download while the sink is backpressured, until the frame window is full. A
+frame leaves the front object's buffer only after `Sink::poll_ready` succeeds.
+This keeps head-of-line ordering explicit without channels, detached tasks,
+global frame slots, or a separate action queue.
 
 The scheduler, sizing policy, request and budget know only frames. A
 higher HTTP adapter is responsible for converting local frame ranges into
@@ -34,8 +33,13 @@ API exposes byte-granular ranges.
 
 The effective target rate is the minimum of the allocated stream rate, the
 consumer rate, and the memory-safe rate derived from the granted frame capacity.
-It sizes buffering and prefetch; it does not pace output. Ready frames are
-returned immediately and transport backpressure remains outside the core.
+It sizes buffering and prefetch; it does not pace output. A sink may implement
+its own rate limiting, and its backpressure only pauses frame emission—not the
+bounded background filling of Ready + Data.
+
+```rust
+session.pipe_into(output_sink).await?;
+```
 
 `TransferModel` currently receives fixed object throughput, TTFB, URL latency
 and object frame count. A caller may update it later as measurements improve.

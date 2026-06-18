@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use futures_util::stream::{Fuse, FusedStream};
 use futures_util::task::noop_waker_ref;
-use futures_util::{Stream, StreamExt};
+use futures_util::{Sink, Stream, StreamExt};
 
 use crate::{FrameBudget, FrameBudgetError, FramePermit, FrameRate, ObjectMeta, StreamRequest};
 use crate::{TransferModel, WindowSizing};
@@ -132,6 +132,13 @@ impl StreamSession {
 
     pub fn plans(&self) -> &VecDeque<ObjectPlan> {
         &self.plans
+    }
+
+    pub fn pipe_into<S>(self, output: S) -> StreamDriver<S> {
+        StreamDriver {
+            session: self,
+            output: Box::pin(output),
+        }
     }
 
     pub fn set_consumer_rate(&mut self, consumer_rate: FrameRate) {
@@ -365,48 +372,87 @@ impl StreamSession {
         if plan.emitted == plan.local_frames.end {
             self.plans.pop_front();
         }
+        let committed: usize = self.plans.iter().map(ObjectPlan::committed).sum();
+        self.allocation
+            .shrink_to(self.capacity_frames().max(committed));
         Some(frame)
     }
-}
 
-impl Stream for StreamSession {
-    type Item = Result<Bytes, BoxError>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.as_mut().get_mut();
-
-        let window = match this.refresh_allocation(cx) {
-            Ok(window) => window,
-            Err(error) => return Poll::Ready(Some(Err(error))),
-        };
-        if let Poll::Ready(Err(error)) = this.poll_objects(cx, window) {
-            return Poll::Ready(Some(Err(error)));
+    fn poll_fill(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), BoxError>> {
+        let window = self.refresh_allocation(cx)?;
+        if let Poll::Ready(Err(error)) = self.poll_objects(cx, window) {
+            return Poll::Ready(Err(error));
         }
-        this.authorize(window.ready_data_frames);
-        if let Poll::Ready(Err(error)) = this.poll_urls(cx) {
-            return Poll::Ready(Some(Err(error)));
+        self.authorize(window.ready_data_frames);
+        if let Poll::Ready(Err(error)) = self.poll_urls(cx) {
+            return Poll::Ready(Err(error));
         }
-        let progressed = match this.poll_downloads(cx) {
+        let progressed = match self.poll_downloads(cx) {
             Poll::Ready(Ok(progressed)) => progressed,
-            Poll::Ready(Err(error)) => return Poll::Ready(Some(Err(error))),
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Pending => false,
         };
 
-        if let Some(frame) = this.pop_ready() {
-            let committed: usize = this.plans.iter().map(ObjectPlan::committed).sum();
-            this.allocation
-                .shrink_to(window.ready_data_frames.max(committed));
-            return Poll::Ready(Some(Ok(frame)));
-        }
-        if this.plans.is_empty()
-            && (this.objects.is_terminated() || this.source_cursor >= this.request.frames().end)
+        if self.plans.is_empty()
+            && (self.objects.is_terminated() || self.source_cursor >= self.request.frames().end)
         {
-            return Poll::Ready(None);
+            return Poll::Ready(Ok(()));
         }
         if progressed {
             cx.waker().wake_by_ref();
         }
         Poll::Pending
+    }
+}
+
+/// Owns both halves of the pipeline, so input keeps progressing while output
+/// is backpressured. No task or intermediate channel is required.
+pub struct StreamDriver<S> {
+    session: StreamSession,
+    output: Pin<Box<S>>,
+}
+
+impl<S> Future for StreamDriver<S>
+where
+    S: Sink<Bytes>,
+    S::Error: Error + Send + Sync + 'static,
+{
+    type Output = Result<(), BoxError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let done = match this.session.poll_fill(cx) {
+            Poll::Ready(Ok(())) => true,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Pending => false,
+        };
+
+        if !done && !this.session.plans.is_empty() {
+            match this.output.as_mut().poll_ready(cx) {
+                Poll::Ready(Ok(())) => {
+                    if let Some(frame) = this.session.pop_ready() {
+                        if let Err(error) = this.output.as_mut().start_send(frame) {
+                            return Poll::Ready(Err(Box::new(error)));
+                        }
+                        cx.waker().wake_by_ref();
+                    }
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(Box::new(error))),
+                Poll::Pending => {}
+            }
+        }
+
+        if done {
+            return this
+                .output
+                .as_mut()
+                .poll_close(cx)
+                .map_err(|error| Box::new(error) as BoxError);
+        }
+        match this.output.as_mut().poll_flush(cx) {
+            Poll::Ready(Ok(())) | Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(Box::new(error))),
+        }
     }
 }
 
@@ -416,13 +462,14 @@ fn message(text: &str) -> BoxError {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Context;
     use std::time::Duration;
 
-    use futures_util::stream;
     use futures_util::task::noop_waker_ref;
-    use futures_util::{StreamExt, TryStreamExt};
+    use futures_util::{Sink, sink, stream};
 
     use super::*;
     use crate::ObjectId;
@@ -495,6 +542,46 @@ mod tests {
         .unwrap()
     }
 
+    fn collecting_output() -> (Arc<Mutex<Vec<Bytes>>>, impl Sink<Bytes, Error = io::Error>) {
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let output = sink::unfold(frames.clone(), |frames, frame| async move {
+            frames.lock().unwrap().push(frame);
+            Ok(frames)
+        });
+        (frames, output)
+    }
+
+    struct BlockedOutput;
+
+    impl Sink<Bytes> for BlockedOutput {
+        type Error = io::Error;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+
+        fn start_send(self: Pin<&mut Self>, _item: Bytes) -> Result<(), Self::Error> {
+            unreachable!()
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
     #[tokio::test]
     async fn emits_frames_in_object_order() {
         let backend = Arc::new(TestBackend {
@@ -509,8 +596,10 @@ mod tests {
             config(3, 3),
         )
         .unwrap();
+        let (frames, output) = collecting_output();
 
-        let frames: Vec<_> = session.try_collect().await.unwrap();
+        session.pipe_into(output).await.unwrap();
+        let frames = frames.lock().unwrap();
         let text: Vec<_> = frames.iter().map(|frame| &frame[..]).collect();
         assert_eq!(
             text,
@@ -519,12 +608,12 @@ mod tests {
     }
 
     #[test]
-    fn buffers_future_objects_without_bypassing_head_of_line() {
+    fn fills_window_while_output_is_backpressured() {
         let backend = Arc::new(TestBackend {
-            block_first: true,
+            block_first: false,
             ..Default::default()
         });
-        let mut session = StreamSession::new(
+        let session = StreamSession::new(
             objects(&[2, 2]),
             backend,
             request(0..4),
@@ -532,12 +621,13 @@ mod tests {
             config(4, 0),
         )
         .unwrap();
+        let mut driver = session.pipe_into(BlockedOutput);
         let mut cx = Context::from_waker(noop_waker_ref());
 
-        assert!(Pin::new(&mut session).poll_next(&mut cx).is_pending());
-        assert!(Pin::new(&mut session).poll_next(&mut cx).is_pending());
-        assert_eq!(session.plans()[0].buffered_frames(), 0);
-        assert_eq!(session.plans()[1].buffered_frames(), 2);
+        assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
+        assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
+        assert_eq!(driver.session.plans()[0].buffered_frames(), 2);
+        assert_eq!(driver.session.plans()[1].buffered_frames(), 2);
     }
 
     #[test]
@@ -556,15 +646,15 @@ mod tests {
         .unwrap();
         let mut cx = Context::from_waker(noop_waker_ref());
 
-        assert!(Pin::new(&mut session).poll_next(&mut cx).is_pending());
+        assert!(session.poll_fill(&mut cx).is_pending());
         assert_eq!(session.plans().len(), 2);
         assert_eq!(backend.polled_urls.load(Ordering::Relaxed), 2);
         assert_eq!(session.plans()[1].authorized_frames(), 0);
         assert!(session.plans()[1].download.is_none());
     }
 
-    #[tokio::test]
-    async fn capacity_can_change_while_streaming() {
+    #[test]
+    fn capacity_can_change_while_streaming() {
         let backend = Arc::new(TestBackend {
             block_first: false,
             ..Default::default()
@@ -578,14 +668,17 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(session.next().await.unwrap().unwrap(), "object-0:0");
+        let mut cx = Context::from_waker(noop_waker_ref());
+        assert!(session.poll_fill(&mut cx).is_pending());
+        assert_eq!(session.pop_ready().unwrap(), "object-0:0");
         session.set_consumer_rate(FrameRate::new(3.0).unwrap());
-        assert_eq!(session.next().await.unwrap().unwrap(), "object-0:1");
+        assert!(session.poll_fill(&mut cx).is_pending());
+        assert_eq!(session.pop_ready().unwrap(), "object-0:1");
         assert_eq!(session.plans()[0].authorized_frames(), 3);
     }
 
-    #[tokio::test]
-    async fn shrinking_waits_for_committed_frames_to_drain() {
+    #[test]
+    fn shrinking_waits_for_committed_frames_to_drain() {
         let backend = Arc::new(TestBackend {
             block_first: false,
             ..Default::default()
@@ -600,9 +693,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(session.next().await.unwrap().unwrap(), "object-0:0");
+        let mut cx = Context::from_waker(noop_waker_ref());
+        assert!(session.poll_fill(&mut cx).is_pending());
+        assert_eq!(session.pop_ready().unwrap(), "object-0:0");
         session.set_consumer_rate(FrameRate::new(1.0).unwrap());
-        assert_eq!(session.next().await.unwrap().unwrap(), "object-0:1");
+        assert!(session.poll_fill(&mut cx).is_pending());
+        assert_eq!(session.pop_ready().unwrap(), "object-0:1");
 
         assert_eq!(session.capacity_frames(), 1);
         assert_eq!(budget.available(), 2);
@@ -622,8 +718,10 @@ mod tests {
             config(3, 0),
         )
         .unwrap();
+        let (frames, output) = collecting_output();
 
-        let frames: Vec<_> = session.try_collect().await.unwrap();
+        session.pipe_into(output).await.unwrap();
+        let frames = frames.lock().unwrap();
         let text: Vec<_> = frames.iter().map(|frame| &frame[..]).collect();
         assert_eq!(text, [b"object-0:2", b"object-1:0", b"object-1:1"]);
     }
@@ -675,9 +773,9 @@ mod tests {
         let mut cx = Context::from_waker(noop_waker_ref());
 
         assert_eq!(waiting.capacity_frames(), 1);
-        assert!(Pin::new(&mut waiting).poll_next(&mut cx).is_pending());
+        assert!(waiting.poll_fill(&mut cx).is_pending());
         drop(holder);
-        assert!(Pin::new(&mut waiting).poll_next(&mut cx).is_pending());
+        assert!(waiting.poll_fill(&mut cx).is_pending());
         assert_eq!(waiting.capacity_frames(), 2);
     }
 }

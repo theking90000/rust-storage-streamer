@@ -14,7 +14,7 @@ use frame_streamer::{
     BoxError, FrameAssembler, FrameBudget, FrameRate, FrameStream, ObjectId, ObjectMeta, SignedUrl,
     StreamBackend, StreamConfig, StreamRequest, StreamSession, TransferModel, UrlTicket,
 };
-use futures_util::{StreamExt, TryStreamExt, stream};
+use futures_util::{StreamExt, sink, stream};
 
 /// Backend that resolves URLs trivially and downloads bodies over HTTP.
 struct HttpBackend {
@@ -25,11 +25,12 @@ impl StreamBackend for HttpBackend {
     fn resolve_url(&self, object: &ObjectMeta) -> UrlTicket {
         // No URL coordinator here: the object URI is already fetchable.
         let url = object.uri.clone();
-        Box::pin(async move { 
+        Box::pin(async move {
             println!("resolving URL for object : {url}");
             tokio::time::sleep(Duration::from_millis(1000)).await; // simulate latency
             println!("resolved URL for object : {url}");
-            Ok(url) })
+            Ok(url)
+        })
     }
 
     fn download(&self, object: &ObjectMeta, url: SignedUrl, frames: Range<u32>) -> FrameStream {
@@ -83,7 +84,10 @@ async fn main() -> Result<(), BoxError> {
         object("flux.2", "http://192.168.129.87:8080/flux.2", 150),
         object("flux.3", "http://192.168.129.87:8080/flux.3", 150),
     ];
-    let total_frames: u64 = catalog.iter().map(|object| u64::from(object.frame_count)).sum();
+    let total_frames: u64 = catalog
+        .iter()
+        .map(|object| u64::from(object.frame_count))
+        .sum();
     let objects = stream::iter(catalog.into_iter().map(Ok::<_, BoxError>));
 
     let backend = Arc::new(HttpBackend {
@@ -102,22 +106,23 @@ async fn main() -> Result<(), BoxError> {
     )?;
 
     let x = TransferModel {
-            object_rate: FrameRate::new(7.6317)?,
-            data_ttfb: Duration::from_millis(500),
-            url_latency: Duration::from_millis(1000),
-            frames_per_object: 150,
-        }.window_for(FrameRate::new(120.0)?)?;
+        object_rate: FrameRate::new(7.6317)?,
+        data_ttfb: Duration::from_millis(500),
+        url_latency: Duration::from_millis(1000),
+        frames_per_object: 150,
+    }
+    .window_for(FrameRate::new(120.0)?)?;
 
     println!("window: {:?}", x);
 
-    let mut session = StreamSession::new(objects, backend, request, budget, config)?;
-
-    let mut index = 0u64;
-    while let Some(frame) = session.try_next().await? {
+    let session = StreamSession::new(objects, backend, request, budget, config)?;
+    let output = sink::unfold(0u64, |index, frame: bytes::Bytes| async move {
         println!("frame {index:>3}: {} bytes", frame.len());
-        index += 1;
-    }
-    println!("done: streamed {index} frames");
+        Ok::<_, std::io::Error>(index + 1)
+    });
+
+    session.pipe_into(output).await?;
+    println!("done");
     Ok(())
 }
 
