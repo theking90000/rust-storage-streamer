@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/frame-streamer", "crates/cli", "crates/file-router", "crates/discord", "crates/discord-host"]
+members = ["crates/frame-streamer", "crates/cli", "crates/file-router", "crates/discord", "crates/discord-host", "crates/s3-router", "crates/s3-host"]
 
 [workspace.package]
 version = "0.1.0"
@@ -30,6 +30,11 @@ indicatif = "0.18"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+s3s = { version = "0.13", features = ["minio"] }
+async-trait = "0.1"
+md-5 = "0.10"
+base64 = "0.22"
+hex = "0.4"
 
 [profile.dev.package."*"]
 opt-level = 3

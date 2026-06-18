@@ -43,6 +43,8 @@ A small Cargo workspace, each crate with one job:
 | [`discord`](crates/discord)                         | The storage backend — uploads/downloads through Discord webhooks, with rate-limit handling.                                                                                                                     |
 | [`discord-host`](crates/discord-host/README.md)     | The production server: wires `file-router` + `discord` together, adds CORS, and serves the web upload UI at `/`.                                                                                                |
 | [`cli`](crates/cli/README.md)                       | `frame-streamer-cli` — uploads a file or a piped stream to the HTTP backend in parallel, with a live progress bar / throughput readout.                                                                          |
+| [`s3-router`](crates/s3-router/README.md)           | Private S3-compatible catalog and router built on `s3s`, with SigV4, buckets, metadata, ranges, multipart uploads, and server-side copies.                                                                        |
+| [`s3-host`](crates/s3-host/README.md)               | Standalone rclone-compatible S3 server backed by Discord. It does not expose the public `file-router` API.                                                                                                       |
 
 ## Quick start
 
@@ -89,6 +91,20 @@ It prints the download URL to stdout. The backend defaults to
 Configuration (bind address, frame size, rate calibration, file-size limits)
 is layered **env > CLI > TOML** — see the
 [`discord-host` README](crates/discord-host/README.md).
+
+### S3 / rclone
+
+The separate `s3-host` binary exposes only an authenticated S3 API. Create a
+credential, start it, then configure rclone with `provider = Other`, path-style
+access, endpoint `http://localhost:8080`, and region `us-east-1`:
+
+```sh
+cargo run -p s3-host -- credential create --can-create-buckets
+DH_WEBHOOKS_FILE=webhooks.txt cargo run -p s3-host -- serve
+```
+
+See the [`s3-host` README](crates/s3-host/README.md) for the rclone config and
+credential grant commands.
 
 ## Build with Nix
 
