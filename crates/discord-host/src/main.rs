@@ -62,6 +62,10 @@ async fn main() -> Result<(), BoxError> {
         .allow_headers(Any);
     let app = router(state)
         .route("/", get(|| async { Html(include_str!("upload-test.html")) }))
+        .route(
+            "/robots.txt",
+            get(|| async { "User-agent: *\nDisallow: /\n" }),
+        )
         .layer(cors);
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
