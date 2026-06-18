@@ -12,7 +12,7 @@ path = "src/main.rs"
 frame-streamer.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
-async-stream = "0.3"
+async-stream.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 tokio-into-sink = "0.1.0"

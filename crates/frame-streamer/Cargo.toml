@@ -9,6 +9,8 @@ name = "frame_streamer"
 path = "src/lib.rs"
 
 [dependencies]
+aes-gcm.workspace = true
+async-stream.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 tokio.workspace = true

@@ -35,11 +35,32 @@ impl ObjectId {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct DecryptKey([u8; 32]);
+
+impl DecryptKey {
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for DecryptKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DecryptKey([REDACTED])")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectMeta {
     pub id: ObjectId,
     pub uri: String,
     pub frame_count: u32,
+    /// This key must not be reused for another object.
+    pub decrypt_key: DecryptKey,
 }
 
 #[derive(Clone, Debug, PartialEq)]

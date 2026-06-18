@@ -7,29 +7,113 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use async_stream::try_stream;
 use bytes::Bytes;
 use futures_util::stream::{Fuse, FusedStream};
 use futures_util::task::noop_waker_ref;
 use futures_util::{Sink, Stream, StreamExt};
 
-use crate::{FrameBudget, FrameBudgetError, FramePermit, FrameRate, ObjectMeta, StreamRequest};
+use crate::{
+    FrameAssembler, FrameBudget, FrameBudgetError, FrameDecoder, FrameError, FramePermit,
+    FrameRate, ObjectMeta, StreamRequest, TAG_SIZE,
+};
 use crate::{TransferModel, WindowSizing};
 
 pub type BoxError = Box<dyn Error + Send + Sync>;
 pub type SignedUrl = String;
 pub type UrlTicket = Pin<Box<dyn Future<Output = Result<SignedUrl, BoxError>> + Send>>;
 pub type FrameStream = Pin<Box<dyn Stream<Item = Result<Bytes, BoxError>> + Send>>;
+pub type EncryptedByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, BoxError>> + Send>>;
 type ObjectStream = Pin<Box<dyn Stream<Item = Result<ObjectMeta, BoxError>> + Send>>;
 type BudgetTicket = Pin<Box<dyn Future<Output = Result<FramePermit, FrameBudgetError>> + Send>>;
 
 /// The URL coordinator and HTTP/crypto pipeline seen by a stream session.
-pub trait StreamBackend: Send + Sync {
+pub trait FrameBackend: Send + Sync {
     /// Creates an owned URL-resolution future. The session polls it while the
     /// object is inside its prefetch window.
     fn resolve_url(&self, object: &ObjectMeta) -> UrlTicket;
 
     /// Opens one sequential stream for the useful local frame range.
     fn download(&self, object: &ObjectMeta, url: SignedUrl, frames: Range<u32>) -> FrameStream;
+}
+
+pub trait EncryptedBytesBackend: Send + Sync {
+    fn resolve_url(&self, object: &ObjectMeta) -> UrlTicket;
+
+    fn download(
+        &self,
+        object: &ObjectMeta,
+        url: SignedUrl,
+        physical_bytes: Range<u64>,
+    ) -> EncryptedByteStream;
+}
+
+/// Turns encrypted HTTP chunks into authenticated plaintext frames.
+pub struct StreamBackend {
+    encrypted: Arc<dyn EncryptedBytesBackend>,
+    frame_size: usize,
+}
+
+impl StreamBackend {
+    pub fn new(
+        encrypted: Arc<dyn EncryptedBytesBackend>,
+        frame_size: usize,
+    ) -> Result<Self, BoxError> {
+        if frame_size <= TAG_SIZE {
+            return Err(Box::new(FrameError::FrameTooSmall));
+        }
+        Ok(Self {
+            encrypted,
+            frame_size,
+        })
+    }
+}
+
+impl FrameBackend for StreamBackend {
+    fn resolve_url(&self, object: &ObjectMeta) -> UrlTicket {
+        self.encrypted.resolve_url(object)
+    }
+
+    fn download(&self, object: &ObjectMeta, url: SignedUrl, frames: Range<u32>) -> FrameStream {
+        let frame_size = self.frame_size;
+        let start = u64::from(frames.start);
+        let end = u64::from(frames.end);
+        let Some(physical_start) = start.checked_mul(frame_size as u64) else {
+            return Box::pin(futures_util::stream::once(async {
+                Err(message("physical range overflow"))
+            }));
+        };
+        let Some(physical_end) = end.checked_mul(frame_size as u64) else {
+            return Box::pin(futures_util::stream::once(async {
+                Err(message("physical range overflow"))
+            }));
+        };
+        let physical_bytes = physical_start..physical_end;
+        let mut input = self.encrypted.download(object, url, physical_bytes);
+        let key = object.decrypt_key.clone();
+
+        Box::pin(try_stream! {
+            let decoder = FrameDecoder::new(frame_size, &key)?;
+            let mut assembler = FrameAssembler::new(frame_size)?;
+            let mut index = start;
+
+            while let Some(chunk) = input.next().await {
+                assembler.push(chunk?);
+                while let Some(frame) = assembler.next_frame_mut() {
+                    if index >= end {
+                        Err(message("backend returned more bytes than requested"))?;
+                    }
+                    yield decoder.decode_frame(frame, index)?;
+                    index += 1;
+                }
+            }
+
+            assembler.finish()?;
+            if index != end {
+                Err(message("backend ended before its last requested frame"))?;
+            }
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -92,7 +176,7 @@ impl ObjectPlan {
 /// buffers frames per object, and only emits from the front object.
 pub struct StreamSession {
     objects: Fuse<ObjectStream>,
-    backend: Arc<dyn StreamBackend>,
+    backend: Arc<dyn FrameBackend>,
     plans: VecDeque<ObjectPlan>,
     request: StreamRequest,
     budget: FrameBudget,
@@ -106,7 +190,7 @@ pub struct StreamSession {
 impl StreamSession {
     pub fn new(
         objects: impl Stream<Item = Result<ObjectMeta, BoxError>> + Send + 'static,
-        backend: Arc<dyn StreamBackend>,
+        backend: Arc<dyn FrameBackend>,
         request: StreamRequest,
         budget: FrameBudget,
         config: StreamConfig,
@@ -462,6 +546,8 @@ fn message(text: &str) -> BoxError {
 
 #[cfg(test)]
 mod tests {
+    use aes_gcm::aead::{AeadInPlace, KeyInit};
+    use aes_gcm::{Aes256Gcm, Nonce};
     use std::io;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -469,7 +555,7 @@ mod tests {
     use std::time::Duration;
 
     use futures_util::task::noop_waker_ref;
-    use futures_util::{Sink, sink, stream};
+    use futures_util::{Sink, TryStreamExt, sink, stream};
 
     use super::*;
     use crate::ObjectId;
@@ -480,7 +566,7 @@ mod tests {
         polled_urls: Arc<AtomicUsize>,
     }
 
-    impl StreamBackend for TestBackend {
+    impl FrameBackend for TestBackend {
         fn resolve_url(&self, object: &ObjectMeta) -> UrlTicket {
             let url = object.uri.clone();
             let polled_urls = self.polled_urls.clone();
@@ -510,6 +596,7 @@ mod tests {
             id: ObjectId::new(format!("object-{index}")),
             uri: format!("objects/{index}"),
             frame_count: frames,
+            decrypt_key: crate::DecryptKey::new([index as u8; 32]),
         }
     }
 
@@ -522,6 +609,47 @@ mod tests {
                 .map(|(index, count)| Ok(object(index, count)))
                 .collect::<Vec<_>>(),
         ))
+    }
+
+    struct RawBackend {
+        body: Bytes,
+        requested: Mutex<Option<Range<u64>>>,
+    }
+
+    impl EncryptedBytesBackend for RawBackend {
+        fn resolve_url(&self, _object: &ObjectMeta) -> UrlTicket {
+            Box::pin(async { Ok("url".into()) })
+        }
+
+        fn download(
+            &self,
+            _object: &ObjectMeta,
+            _url: SignedUrl,
+            physical_bytes: Range<u64>,
+        ) -> EncryptedByteStream {
+            *self.requested.lock().unwrap() = Some(physical_bytes.clone());
+            let selected = self
+                .body
+                .slice(physical_bytes.start as usize..physical_bytes.end as usize);
+            let chunks = selected
+                .chunks(5)
+                .map(|chunk| Ok(Bytes::copy_from_slice(chunk)))
+                .collect::<Vec<_>>();
+            Box::pin(stream::iter(chunks))
+        }
+    }
+
+    fn encrypted_frame(key: &crate::DecryptKey, index: u64, payload: &[u8]) -> Bytes {
+        let cipher = Aes256Gcm::new(key.as_bytes().into());
+        let mut ciphertext = payload.to_vec();
+        let mut nonce = [0; 12];
+        nonce[4..].copy_from_slice(&index.to_be_bytes());
+        let tag = cipher
+            .encrypt_in_place_detached(Nonce::from_slice(&nonce), b"", &mut ciphertext)
+            .unwrap();
+        let mut frame = Vec::from(tag.as_slice());
+        frame.extend(ciphertext);
+        Bytes::from(frame)
     }
 
     fn request(frames: Range<u64>) -> StreamRequest {
@@ -605,6 +733,27 @@ mod tests {
             text,
             [b"object-0:0", b"object-0:1", b"object-1:0", b"object-1:1"]
         );
+    }
+
+    #[tokio::test]
+    async fn decrypting_backend_maps_ranges_and_assembles_chunks() {
+        let object = object(7, 2);
+        let mut body = Vec::new();
+        body.extend(encrypted_frame(&object.decrypt_key, 0, b"frame-0!"));
+        body.extend(encrypted_frame(&object.decrypt_key, 1, b"frame-1!"));
+        let raw = Arc::new(RawBackend {
+            body: Bytes::from(body),
+            requested: Mutex::new(None),
+        });
+        let backend = StreamBackend::new(raw.clone(), 24).unwrap();
+
+        let frames = FrameBackend::download(&backend, &object, "url".into(), 1..2)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+
+        assert_eq!(*raw.requested.lock().unwrap(), Some(24..48));
+        assert_eq!(frames, [Bytes::from_static(b"frame-1!")]);
     }
 
     #[test]

@@ -14,8 +14,9 @@ use std::time::Duration;
 use async_stream::try_stream;
 use bytes::Bytes;
 use frame_streamer::{
-    BoxError, FrameAssembler, FrameBudget, FrameRate, FrameStream, ObjectId, ObjectMeta, SignedUrl,
-    StreamBackend, StreamConfig, StreamRequest, StreamSession, TransferModel, UrlTicket,
+    BoxError, DecryptKey, FrameAssembler, FrameBackend, FrameBudget, FrameRate, FrameStream,
+    ObjectId, ObjectMeta, SignedUrl, StreamConfig, StreamRequest, StreamSession, TransferModel,
+    UrlTicket,
 };
 use futures_util::{Sink, StreamExt, stream};
 use tokio_into_sink::IntoSinkExt;
@@ -57,7 +58,7 @@ struct HttpBackend {
     client: reqwest::Client,
 }
 
-impl StreamBackend for HttpBackend {
+impl FrameBackend for HttpBackend {
     fn resolve_url(&self, object: &ObjectMeta) -> UrlTicket {
         // No URL coordinator here: the object URI is already fetchable.
         let url = object.uri.clone();
@@ -121,8 +122,8 @@ async fn main() -> Result<(), BoxError> {
         object("flux.2", "https://proof.ovh.net/files/10Mb.dat", 150),
         object("flux.3", "https://proof.ovh.net/files/10Mb.dat", 150),
         object("flux.4", "https://proof.ovh.net/files/10Mb.dat", 150),
-       // object("flux.1", "http://192.168.129.87:8080/flux.1", 150),
-       // object("flux.2", "http://192.168.129.87:8080/flux.2", 150),
+        // object("flux.1", "http://192.168.129.87:8080/flux.1", 150),
+        // object("flux.2", "http://192.168.129.87:8080/flux.2", 150),
         // object("flux.3", "http://192.168.129.87:8080/flux.3", 150),
     ];
     let total_frames: u64 = catalog
@@ -135,7 +136,7 @@ async fn main() -> Result<(), BoxError> {
         client: reqwest::Client::new(),
     });
     let request = StreamRequest::new(0..total_frames, FrameRate::new(120.0)?)?;
-    let budget = FrameBudget::new(150*10)?; // 100MB of memory budget
+    let budget = FrameBudget::new(150 * 10)?; // 100MB of memory budget
     let config = StreamConfig::new(
         FrameRate::new(12.0)?, // 1200fps
         TransferModel {
@@ -178,5 +179,6 @@ fn object(id: &str, uri: &str, frame_count: u32) -> ObjectMeta {
         id: ObjectId::new(id),
         uri: uri.to_owned(),
         frame_count,
+        decrypt_key: DecryptKey::new([0; 32]),
     }
 }

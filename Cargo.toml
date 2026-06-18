@@ -10,5 +10,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 frame-streamer = { path = "crates/frame-streamer" }
 bytes = "1"
+aes-gcm = "0.10"
+async-stream = "0.3"
 futures-util = { version = "0.3", features = ["sink"] }
 tokio = { version = "1", features = ["macros", "rt", "sync", "test-util", "time"] }
