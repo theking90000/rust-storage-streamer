@@ -17,7 +17,7 @@ use tokio_into_sink::IntoSinkExt;
 
 const FRAME_SIZE: usize = 1 << 16;
 const TOTAL_BYTES: u64 = 27_153_749;
-const OBJECT_RATE: f64 = 500_000.0 / 8.0;
+const OBJECT_RATE: f64 = 500_000.0;
 const TARGET_RATE: f64 = OBJECT_RATE * 3.0;
 
 struct OneFrameOutput(Option<Bytes>);
