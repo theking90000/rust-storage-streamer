@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
 use frame_streamer::BoxError;
@@ -8,6 +9,28 @@ use frame_streamer::BoxError;
 pub struct Webhook {
     pub id: String,
     pub token: String,
+}
+
+/// Loads a webhook list from a file with one `<id>:<token>` per line. Blank
+/// lines and `#` comments are skipped. Splits on the first `:` only — Discord
+/// tokens contain none, so id and token are unambiguous.
+pub async fn load_webhooks(path: impl AsRef<Path>) -> Result<Vec<Webhook>, BoxError> {
+    let text = tokio::fs::read_to_string(path).await?;
+    let mut out = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (id, token) = line
+            .split_once(':')
+            .ok_or_else(|| BoxError::from(format!("line {}: expected <id>:<token>", n + 1)))?;
+        out.push(Webhook {
+            id: id.to_owned(),
+            token: token.to_owned(),
+        });
+    }
+    Ok(out)
 }
 
 /// Runtime state for one webhook in the registry.
@@ -73,6 +96,21 @@ mod tests {
         assert_eq!(parsed.id, "123");
         assert_eq!(parsed.token, "tok.en-_x");
         assert_eq!(parsed.message_id, "456");
+    }
+
+    #[tokio::test]
+    async fn loads_webhooks_skipping_blanks_and_comments() {
+        let path = std::env::temp_dir().join("discord-webhooks-test.txt");
+        tokio::fs::write(&path, "# comment\n\n123:tok:en\n")
+            .await
+            .unwrap();
+        let hooks = load_webhooks(&path).await.unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].id, "123");
+        assert_eq!(hooks[0].token, "tok:en"); // only the first ':' splits
+        tokio::fs::write(&path, "no-colon-here").await.unwrap();
+        assert!(load_webhooks(&path).await.is_err());
+        tokio::fs::remove_file(&path).await.ok();
     }
 
     #[test]

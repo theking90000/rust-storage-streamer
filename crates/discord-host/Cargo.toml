@@ -1,0 +1,19 @@
+[package]
+name = "discord-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "discord-host"
+path = "src/main.rs"
+
+[dependencies]
+file-router = { path = "../file-router" }
+discord = { path = "../discord" }
+frame-streamer.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "fs"] }
+axum.workspace = true
+serde.workspace = true
+toml.workspace = true
+clap.workspace = true

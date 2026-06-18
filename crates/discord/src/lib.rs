@@ -26,7 +26,7 @@ use crate::client::DiscordCore;
 use crate::download::DiscordDownload;
 use crate::upload::DiscordEncryptedUpload;
 
-pub use crate::webhook::Webhook;
+pub use crate::webhook::{Webhook, load_webhooks};
 
 /// The pair of backends produced for the server/CLI to wire up.
 pub struct DiscordBackends {
