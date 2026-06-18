@@ -2,17 +2,17 @@
 //!
 //! It feeds the session a hardcoded list of objects, resolves each "signed URL"
 //! to the object's own URI, and downloads the body with async `reqwest`,
-//! splitting it into the object's frames. It is intentionally simple: a real
-//! adapter would assemble fixed-size physical frames and decrypt them.
+//! assembling physical frames from the streamed response chunk by chunk. It is
+//! intentionally simple: a real adapter would also decrypt each frame.
 
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
+use async_stream::try_stream;
 use frame_streamer::{
-    BoxError, FrameBudget, FrameRate, FrameStream, ObjectId, ObjectMeta, SignedUrl, StreamBackend,
-    StreamConfig, StreamRequest, StreamSession, TransferModel, UrlTicket,
+    BoxError, FrameAssembler, FrameBudget, FrameRate, FrameStream, ObjectId, ObjectMeta, SignedUrl,
+    StreamBackend, StreamConfig, StreamRequest, StreamSession, TransferModel, UrlTicket,
 };
 use futures_util::{StreamExt, TryStreamExt, stream};
 
@@ -25,55 +25,63 @@ impl StreamBackend for HttpBackend {
     fn resolve_url(&self, object: &ObjectMeta) -> UrlTicket {
         // No URL coordinator here: the object URI is already fetchable.
         let url = object.uri.clone();
-        Box::pin(async move { Ok(url) })
+        Box::pin(async move { 
+            println!("resolving URL for object : {url}");
+            tokio::time::sleep(Duration::from_millis(1000)).await; // simulate latency
+            println!("resolved URL for object : {url}");
+            Ok(url) })
     }
 
     fn download(&self, object: &ObjectMeta, url: SignedUrl, frames: Range<u32>) -> FrameStream {
         let client = self.client.clone();
         let frame_count = object.frame_count;
+        let id = object.id.as_str().to_owned();
 
-        let body = async move {
-            let bytes = client
-                .get(&url)
-                .send()
-                .await?
-                .error_for_status()?
-                .bytes()
-                .await?;
-            Ok::<_, BoxError>(split_frames(&bytes, frame_count, frames))
-        };
+        Box::pin(try_stream! {
+            let response = client.get(&url).send().await?.error_for_status()?;
+            let total = response
+                .content_length()
+                .ok_or("response is missing a Content-Length")?;
+            if total % u64::from(frame_count) != 0 {
+                Err(format!(
+                    "object {id} body of {total} bytes does not split into {frame_count} frames"
+                ))?;
+            }
+            let frame_size = 65536;
 
-        // Turn the single download future into a stream of frame results.
-        stream::once(body)
-            .map(|result| match result {
-                Ok(parts) => stream::iter(parts.into_iter().map(Ok)).boxed(),
-                Err(error) => stream::once(async move { Err(error) }).boxed(),
-            })
-            .flatten()
-            .boxed()
-    }
-}
+            let mut assembler = FrameAssembler::new(frame_size)?;
+            let mut body = response.bytes_stream();
+            let mut index: u32 = 0;
 
-/// Splits a body into `count` near-equal frames and keeps the `wanted` subrange.
-fn split_frames(body: &Bytes, count: u32, wanted: Range<u32>) -> Vec<Bytes> {
-    let count = count as usize;
-    let len = body.len();
-    (wanted.start as usize..wanted.end as usize)
-        .map(|index| {
-            let start = index * len / count;
-            let end = (index + 1) * len / count;
-            body.slice(start..end)
+            // Pull the body lazily and emit each physical frame the moment it is
+            // complete. The session only polls this stream up to the frames it has
+            // authorized; once it stops, the future suspends mid-body and the TCP
+            // read backpressures the server, so we never buffer the whole object.
+            while index < frames.end {
+                let Some(chunk) = body.next().await else { break };
+                assembler.push(chunk?);
+                while let Some(frame) = assembler.next_frame() {
+                    if index >= frames.start {
+                        println!("downloaded frame {index:>3} of object {id}");
+                        yield frame;
+                    }
+                    index += 1;
+                    if index >= frames.end {
+                        break;
+                    }
+                }
+            }
         })
-        .collect()
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     // Hardcoded objects. httpbin returns N random bytes, split into frames below.
     let catalog = vec![
-        object("clip-0", "http://192.168.129.87:8080/flux.1", 150),
-        object("clip-0", "http://192.168.129.87:8080/flux.2", 150),
-        object("clip-0", "http://192.168.129.87:8080/flux.3", 150),
+        object("flux.1", "http://192.168.129.87:8080/flux.1", 150),
+        object("flux.2", "http://192.168.129.87:8080/flux.2", 150),
+        object("flux.3", "http://192.168.129.87:8080/flux.3", 150),
     ];
     let total_frames: u64 = catalog.iter().map(|object| u64::from(object.frame_count)).sum();
     let objects = stream::iter(catalog.into_iter().map(Ok::<_, BoxError>));
@@ -82,16 +90,25 @@ async fn main() -> Result<(), BoxError> {
         client: reqwest::Client::new(),
     });
     let request = StreamRequest::new(0..total_frames, FrameRate::new(120.0)?)?;
-    let budget = FrameBudget::new(64)?;
+    let budget = FrameBudget::new(160)?;
     let config = StreamConfig::new(
         FrameRate::new(120.0)?,
         TransferModel {
-            object_rate: FrameRate::new(1_000.0)?,
-            data_ttfb: Duration::from_millis(200),
-            url_latency: Duration::from_millis(100),
-            frames_per_object: 4,
+            object_rate: FrameRate::new(7.6317)?,
+            data_ttfb: Duration::from_millis(500),
+            url_latency: Duration::from_millis(1000),
+            frames_per_object: 150,
         },
     )?;
+
+    let x = TransferModel {
+            object_rate: FrameRate::new(7.6317)?,
+            data_ttfb: Duration::from_millis(500),
+            url_latency: Duration::from_millis(1000),
+            frames_per_object: 150,
+        }.window_for(FrameRate::new(120.0)?)?;
+
+    println!("window: {:?}", x);
 
     let mut session = StreamSession::new(objects, backend, request, budget, config)?;
 
