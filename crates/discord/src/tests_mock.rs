@@ -125,6 +125,29 @@ async fn uploads_then_resolves_and_downloads_a_range() {
 }
 
 #[tokio::test]
+#[ignore = "hits real Discord; set DISCORD_WEBHOOK_ID and DISCORD_WEBHOOK_TOKEN"]
+async fn live_round_trip() {
+    let id = std::env::var("DISCORD_WEBHOOK_ID").unwrap();
+    let token = std::env::var("DISCORD_WEBHOOK_TOKEN").unwrap();
+    let core = Arc::new(DiscordCore::new(vec![Webhook { id, token }]).unwrap());
+
+    let payload = b"ponytail discord smoke test";
+    let stored = core.post_attachment(body(payload)).await.unwrap();
+    let parsed = crate::webhook::parse_uri(&stored.uri).unwrap();
+    let url = core
+        .resolve_attachment(&parsed.id, &parsed.token, &parsed.message_id)
+        .await
+        .unwrap();
+    let chunks: Vec<Bytes> = core
+        .cdn_range(url.as_str(), 0..payload.len() as u64)
+        .try_collect()
+        .await
+        .unwrap();
+    let got: Vec<u8> = chunks.into_iter().flatten().collect();
+    assert_eq!(got, payload);
+}
+
+#[tokio::test]
 async fn a_dead_webhook_errors_and_is_pruned() {
     let (base, _) = start_mock(Some("1".to_owned())).await;
     // Webhook "1" returns 404 (Unknown Webhook); "2" works.
