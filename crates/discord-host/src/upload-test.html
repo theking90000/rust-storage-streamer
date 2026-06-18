@@ -1,22 +1,100 @@
 <!doctype html>
 <meta charset="utf-8" />
-<title>File Upload Test</title>
+<title>Rust Storage Streamer — Upload</title>
+<style>
+  body {
+    font-family: system-ui, sans-serif;
+    min-height: 100vh;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+  }
+  progress {
+    width: 400px;
+    height: 1.5rem;
+  }
+  #status {
+    font-variant-numeric: tabular-nums;
+  }
+  #desc {
+    max-width: 500px;
+    text-align: center;
+  }
+</style>
+
+<h1>Rust Storage Streamer</h1>
+<p id="desc">
+  This page is an interface for discord-storage-streamer, a small Rust
+  application that uses Discord webhooks as a storage backend. Every file sent
+  is uploaded chunk by chunk, encrypted, and stored inside a Discord webhook
+  message. Files can be downloaded sequentially at very high throughput
+  (targeting 60 MB/s) and support HTTP Content-Range.
+</p>
 <input type="file" id="file" />
 <div id="status"></div>
-<progress id="progress" value="0" max="100" style="width: 400px"></progress>
+<progress id="progress" value="0" max="100"></progress>
 <div id="result"></div>
 
 <script>
   const SEGMENT_SIZE = ((1 << 16) - 16) * 150; //150* 64KB, matches server default frame_size
   const BASE = "";
+  // `status` is a reserved window property, so grab the element explicitly.
+  const statusEl = document.getElementById("status");
 
   file.onchange = async () => {
     const f = file.files[0];
     if (!f) return;
 
-    status.textContent = "Creating file...";
+    statusEl.textContent = "Creating file...";
     progress.value = 0;
     result.innerHTML = "";
+
+    let uploadedBytes = 0;
+    let lastBytes = 0;
+    let lastTime = performance.now();
+    let done = 0;
+    let segments = 0;
+    const timer = setInterval(() => {
+      const now = performance.now();
+      const mbps = ((uploadedBytes - lastBytes) / (now - lastTime)) / 1e3;
+      lastBytes = uploadedBytes;
+      lastTime = now;
+      const pct = (uploadedBytes / f.size) * 100;
+      progress.value = pct;
+      statusEl.textContent =
+        `${pct.toFixed(1)}% complété (${mbps.toFixed(1)} MB/s) — ` +
+        `${done}/${segments} morceaux, ${segments - done} restant`;
+    }, 300);
+
+    // PUT via XHR so upload.onprogress feeds the live throughput counter.
+    function putSegment(url, blob) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("PUT", url);
+        let last = 0;
+        xhr.upload.onprogress = (e) => {
+          uploadedBytes += e.loaded - last;
+          last = e.loaded;
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            uploadedBytes += blob.size - last; // count any bytes progress missed
+            resolve();
+          } else {
+            uploadedBytes -= last; // failed attempt doesn't count
+            reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+          }
+        };
+        xhr.onerror = () => {
+          uploadedBytes -= last;
+          reject(new Error("network error"));
+        };
+        xhr.send(blob);
+      });
+    }
 
     try {
       const create = await fetch(BASE + "/files", {
@@ -33,9 +111,7 @@
       const { id } = await create.json();
 
       const N = 4;
-      const segments = Math.ceil(f.size / SEGMENT_SIZE);
-      let done = 0;
-
+      segments = Math.ceil(f.size / SEGMENT_SIZE);
       const MAX_RETRIES = 3;
 
       async function uploadSegment(i) {
@@ -44,13 +120,8 @@
         const blob = f.slice(start, end);
         for (let attempt = 0; ; attempt++) {
           try {
-            const upload = await fetch(`${BASE}/files/${id}/segments/${i}`, {
-              method: "PUT",
-              body: blob,
-            });
-            if (!upload.ok) {
-              throw new Error(await upload.text());
-            }
+            await putSegment(`${BASE}/files/${id}/segments/${i}`, blob);
+            done++;
             break;
           } catch (e) {
             if (attempt >= MAX_RETRIES)
@@ -58,9 +129,6 @@
             await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
           }
         }
-        done++;
-        status.textContent = `Uploading segment ${done}/${segments}...`;
-        progress.value = (done / (segments + 1)) * 100;
       }
 
       const queue = Array.from({ length: segments }, (_, i) => i);
@@ -72,19 +140,21 @@
         }),
       );
 
-      status.textContent = "Finalizing...";
+      statusEl.textContent = "Finalizing...";
       const complete = await fetch(`${BASE}/files/${id}/complete`, {
         method: "POST",
       });
       if (!complete.ok)
         throw new Error("Complete failed: " + (await complete.text()));
 
+      clearInterval(timer);
       progress.value = 100;
       const dl = `${BASE}/files/${id}`;
-      status.textContent = "Done!";
+      statusEl.textContent = "Done!";
       result.innerHTML = `File ID: ${id}<br><a href="${dl}">Download</a>`;
     } catch (e) {
-      status.textContent = "Error: " + e.message;
+      clearInterval(timer);
+      statusEl.textContent = "Error: " + e.message;
       progress.value = 0;
     }
   };
