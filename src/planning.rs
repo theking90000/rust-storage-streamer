@@ -1,4 +1,6 @@
-use crate::StreamRequest;
+use bytes::Bytes;
+
+use crate::{FrameError, StreamRequest};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PhysicalRange {
@@ -55,6 +57,40 @@ pub struct ObjectReadPlan {
 impl ObjectReadPlan {
     pub const fn frame_count(&self) -> u64 {
         self.end_global_frame_exclusive - self.first_global_frame
+    }
+
+    /// Clips an authenticated plaintext frame to the exact requested logical
+    /// interval represented by this plan.
+    pub fn clip_frame(
+        &self,
+        payload: Bytes,
+        global_frame_index: u64,
+        frame_payload_size: usize,
+    ) -> Result<Bytes, FrameError> {
+        if global_frame_index < self.first_global_frame
+            || global_frame_index >= self.end_global_frame_exclusive
+        {
+            return Err(FrameError::FrameOutsidePlan {
+                frame_index: global_frame_index,
+            });
+        }
+        if payload.len() != frame_payload_size {
+            return Err(FrameError::UnexpectedPayloadSize {
+                expected: frame_payload_size,
+                actual: payload.len(),
+            });
+        }
+
+        let frame_start = global_frame_index
+            .checked_mul(frame_payload_size as u64)
+            .expect("validated stream dimensions cannot overflow");
+        let frame_end = frame_start + frame_payload_size as u64;
+        let exposed_start = self.logical_start.max(frame_start);
+        let exposed_end = self.logical_end_exclusive.min(frame_end);
+
+        let local_start = (exposed_start - frame_start) as usize;
+        let local_end = (exposed_end - frame_start) as usize;
+        Ok(payload.slice(local_start..local_end))
     }
 }
 
@@ -263,5 +299,22 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, StreamRequestError::RequestedRangeOverflow);
+    }
+
+    #[test]
+    fn clips_first_and_last_decoded_frames_without_copying() {
+        let planner = ReadPlanner::new(&request(10, 20, &[4]));
+        let plan = &planner.plans()[0];
+        let first = Bytes::from_static(b"0123456789abcdef");
+        let second = Bytes::from_static(b"ghijklmnopqrstuv");
+
+        assert_eq!(
+            plan.clip_frame(first, 0, PAYLOAD_SIZE as usize).unwrap(),
+            Bytes::from_static(b"abcdef")
+        );
+        assert_eq!(
+            plan.clip_frame(second, 1, PAYLOAD_SIZE as usize).unwrap(),
+            Bytes::from_static(b"ghijklmnopqrst")
+        );
     }
 }

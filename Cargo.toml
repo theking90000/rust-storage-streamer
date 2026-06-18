@@ -9,4 +9,4 @@ name = "s_streamer"
 path = "src/lib.rs"
 
 [dependencies]
-
+bytes = "1"
