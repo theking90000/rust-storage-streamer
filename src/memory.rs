@@ -32,7 +32,13 @@ impl MemoryBudget {
             return Err(MemoryBudgetError::ZeroUnitSize);
         }
 
-        let units = total_bytes.div_ceil(unit_size);
+        let units = total_bytes / unit_size;
+        if units == 0 {
+            return Err(MemoryBudgetError::BudgetSmallerThanUnit {
+                total_bytes,
+                unit_size,
+            });
+        }
         let total_units =
             u32::try_from(units).map_err(|_| MemoryBudgetError::TooManyUnits { units })?;
         if units > Semaphore::MAX_PERMITS {
@@ -77,8 +83,8 @@ impl MemoryBudget {
         self.unit_size
     }
 
-    /// Effective capacity after rounding the configured byte budget up to
-    /// whole units.
+    /// Effective capacity after rounding the configured byte budget down to
+    /// whole units. It never exceeds the configured budget.
     pub const fn capacity_bytes(&self) -> usize {
         self.total_units as usize * self.unit_size
     }
@@ -102,6 +108,10 @@ impl MemoryPermit {
 pub enum MemoryBudgetError {
     ZeroTotalBytes,
     ZeroUnitSize,
+    BudgetSmallerThanUnit {
+        total_bytes: usize,
+        unit_size: usize,
+    },
     ZeroReservation,
     TooManyUnits {
         units: usize,
@@ -118,6 +128,13 @@ impl fmt::Display for MemoryBudgetError {
         match self {
             Self::ZeroTotalBytes => f.write_str("memory budget must be greater than zero"),
             Self::ZeroUnitSize => f.write_str("memory unit size must be greater than zero"),
+            Self::BudgetSmallerThanUnit {
+                total_bytes,
+                unit_size,
+            } => write!(
+                f,
+                "memory budget of {total_bytes} bytes cannot hold one {unit_size}-byte unit"
+            ),
             Self::ZeroReservation => f.write_str("memory reservation must be greater than zero"),
             Self::TooManyUnits { units } => {
                 write!(
@@ -147,13 +164,24 @@ mod tests {
 
     #[tokio::test]
     async fn rounds_reservations_up_to_whole_units() {
-        let budget = MemoryBudget::new(100, 64).unwrap();
+        let budget = MemoryBudget::new(200, 64).unwrap();
         let permit = budget.reserve(65).await.unwrap();
 
-        assert_eq!(budget.capacity_bytes(), 128);
+        assert_eq!(budget.capacity_bytes(), 192);
         assert_eq!(permit.requested_bytes(), 65);
         assert_eq!(permit.reserved_bytes(), 128);
-        assert_eq!(budget.available_bytes(), 0);
+        assert_eq!(budget.available_bytes(), 64);
+    }
+
+    #[tokio::test]
+    async fn rounds_total_capacity_down_to_preserve_the_hard_limit() {
+        let budget = MemoryBudget::new(100, 64).unwrap();
+
+        assert_eq!(budget.capacity_bytes(), 64);
+        assert!(matches!(
+            budget.reserve(65).await,
+            Err(MemoryBudgetError::ReservationExceedsBudget { .. })
+        ));
     }
 
     #[tokio::test]
@@ -180,6 +208,17 @@ mod tests {
             MemoryBudgetError::ReservationExceedsBudget {
                 requested_bytes: 129,
                 capacity_bytes: 128,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_a_budget_smaller_than_one_unit() {
+        assert_eq!(
+            MemoryBudget::new(63, 64).unwrap_err(),
+            MemoryBudgetError::BudgetSmallerThanUnit {
+                total_bytes: 63,
+                unit_size: 64,
             }
         );
     }
