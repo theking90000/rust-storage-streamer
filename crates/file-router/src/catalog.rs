@@ -12,6 +12,13 @@ pub struct Catalog {
     pool: SqlitePool,
 }
 
+pub struct CompletedFile {
+    pub size: u64,
+    pub name: String,
+    pub content_type: String,
+    pub objects: Vec<ObjectMeta>,
+}
+
 impl Catalog {
     pub async fn connect(url: &str) -> Result<Self, sqlx::Error> {
         let mut options = SqliteConnectOptions::from_str(url)?
@@ -32,13 +39,23 @@ impl Catalog {
         Ok(Self { pool })
     }
 
-    pub async fn create_file(&self, id: &str, expected_size: u64) -> Result<(), CatalogError> {
-        sqlx::query("INSERT INTO files(id, created_at, expected_size) VALUES (?, ?, ?)")
-            .bind(id)
-            .bind(now())
-            .bind(expected_size as i64)
-            .execute(&self.pool)
-            .await?;
+    pub async fn create_file(
+        &self,
+        id: &str,
+        name: &str,
+        content_type: &str,
+        expected_size: u64,
+    ) -> Result<(), CatalogError> {
+        sqlx::query(
+            "INSERT INTO files(id, created_at, name, content_type, expected_size) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(now())
+        .bind(name)
+        .bind(content_type)
+        .bind(expected_size as i64)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -214,8 +231,8 @@ impl Catalog {
     pub async fn completed_file(
         &self,
         file_id: &str,
-    ) -> Result<(u64, Vec<ObjectMeta>), CatalogError> {
-        let row = sqlx::query("SELECT size, completed_at FROM files WHERE id = ?")
+    ) -> Result<CompletedFile, CatalogError> {
+        let row = sqlx::query("SELECT size, completed_at, name, content_type FROM files WHERE id = ?")
             .bind(file_id)
             .fetch_optional(&self.pool)
             .await?
@@ -226,6 +243,8 @@ impl Catalog {
         if row.try_get::<Option<i64>, _>(1)?.is_none() {
             return Err(CatalogError::NotCompleted);
         }
+        let name: String = row.try_get(2)?;
+        let content_type: String = row.try_get(3)?;
         let rows = sqlx::query(
             "SELECT s.id, s.uri, s.frame_count, s.decrypt_key FROM file_segments fs JOIN segments s ON s.id = fs.segment_id WHERE fs.file_id = ? ORDER BY fs.segment_index",
         )
@@ -245,7 +264,12 @@ impl Catalog {
                 decrypt_key: DecryptKey::new(key),
             });
         }
-        Ok((size, objects))
+        Ok(CompletedFile {
+            size,
+            name,
+            content_type,
+            objects,
+        })
     }
 
     pub(crate) async fn cached_url(

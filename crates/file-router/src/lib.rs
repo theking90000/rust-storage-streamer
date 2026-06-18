@@ -86,7 +86,14 @@ pub fn router(state: AppState) -> Router {
 
 #[derive(Deserialize)]
 struct CreateFile {
+    name: String,
+    #[serde(default = "default_content_type")]
+    content_type: String,
     expected_size: u64,
+}
+
+fn default_content_type() -> String {
+    "application/octet-stream".to_string()
 }
 
 #[derive(Serialize)]
@@ -105,10 +112,13 @@ async fn create_file(
             "file allocation exceeds server limit",
         ));
     }
+    if request.name.is_empty() {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "file name is required"));
+    }
     let id = Uuid::new_v4().to_string();
     state
         .catalog
-        .create_file(&id, request.expected_size)
+        .create_file(&id, &request.name, &request.content_type, request.expected_size)
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -211,7 +221,9 @@ async fn download_file(
     Path(file_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let (size, objects) = state.catalog.completed_file(&file_id).await?;
+    let file = state.catalog.completed_file(&file_id).await?;
+    let size = file.size;
+    let objects = file.objects;
     let range = parse_range(headers.get(header::RANGE), size)?;
     let partial = range != (0..size);
     let length = range.end - range.start;
@@ -223,7 +235,11 @@ async fn download_file(
         })
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, length.to_string())
-        .header(header::CONTENT_TYPE, "application/octet-stream");
+        .header(header::CONTENT_TYPE, file.content_type)
+        /*.header(
+            header::CONTENT_DISPOSITION,
+            content_disposition(&file.name),
+        )*/;
     if partial {
         builder = builder.header(
             header::CONTENT_RANGE,
@@ -308,6 +324,26 @@ fn range_error(size: u64) -> ApiError {
     );
     error.content_range = Some(format!("bytes */{size}"));
     error
+}
+
+/// Builds an `attachment` Content-Disposition with an ASCII-safe `filename`
+/// and an RFC 5987 `filename*` carrying the exact UTF-8 name.
+fn content_disposition(name: &str) -> String {
+    let ascii: String = name
+        .chars()
+        .map(|c| if c.is_ascii() && c != '"' && c != '\\' { c } else { '_' })
+        .collect();
+    let mut encoded = String::with_capacity(name.len());
+    for byte in name.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(char::from_digit((byte >> 4) as u32, 16).unwrap());
+            encoded.push(char::from_digit((byte & 15) as u32, 16).unwrap());
+        }
+    }
+    format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -582,7 +618,7 @@ mod tests {
                 Request::post("/files")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(format!(
-                        r#"{{"expected_size":{expected_size}}}"#
+                        r#"{{"name":"test.bin","content_type":"text/plain","expected_size":{expected_size}}}"#
                     )))
                     .unwrap(),
             )
@@ -715,7 +751,10 @@ mod tests {
     #[tokio::test]
     async fn serializes_concurrent_allocation_and_blocks_finalize_during_upload() {
         let catalog = Catalog::connect("sqlite::memory:").await.unwrap();
-        catalog.create_file("pending", 8).await.unwrap();
+        catalog
+            .create_file("pending", "pending.bin", "application/octet-stream", 8)
+            .await
+            .unwrap();
         catalog.reserve_segment("pending", 0).await.unwrap();
         assert!(matches!(
             catalog.complete_file("pending", 8).await,
@@ -782,6 +821,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "text/plain");
+        assert_eq!(
+            response.headers()[header::CONTENT_DISPOSITION],
+            "attachment; filename=\"test.bin\"; filename*=UTF-8''test.bin"
+        );
         assert_eq!(
             response.into_body().collect().await.unwrap().to_bytes(),
             "abcdefghijk"

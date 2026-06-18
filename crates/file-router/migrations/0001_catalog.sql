@@ -2,6 +2,8 @@ CREATE TABLE files (
     id TEXT PRIMARY KEY,
     created_at INTEGER NOT NULL,
     completed_at INTEGER,
+    name TEXT NOT NULL,
+    content_type TEXT NOT NULL,
     expected_size INTEGER NOT NULL CHECK (expected_size >= 0),
     size INTEGER CHECK (size >= 0)
 );
