@@ -47,6 +47,11 @@ impl FramePacer {
         }
     }
 
+    pub fn set_rate(&mut self, rate: FrameRate) {
+        self.refill();
+        self.rate = rate;
+    }
+
     fn refill(&mut self) {
         let now = Instant::now();
         self.tokens = (self.tokens

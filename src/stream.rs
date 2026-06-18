@@ -11,7 +11,7 @@ use bytes::Bytes;
 use futures_util::stream::{Fuse, FusedStream};
 use futures_util::{Stream, StreamExt};
 
-use crate::{ObjectMeta, StreamRequest};
+use crate::{FrameRate, ObjectMeta, StreamRequest};
 
 pub type BoxError = Box<dyn Error + Send + Sync>;
 pub type SignedUrl = String;
@@ -94,7 +94,7 @@ pub struct StreamSession {
     plans: VecDeque<ObjectPlan>,
     capacity_frames: usize,
     prefetch_frames: usize,
-    requested_frames: Range<u64>,
+    request: StreamRequest,
     source_cursor: u64,
 }
 
@@ -112,7 +112,7 @@ impl StreamSession {
             plans: VecDeque::new(),
             capacity_frames: config.capacity_frames,
             prefetch_frames: config.prefetch_frames,
-            requested_frames: request.frames(),
+            request,
             source_cursor: 0,
         }
     }
@@ -137,12 +137,16 @@ impl StreamSession {
         self.plans.iter().map(ObjectPlan::buffered_frames).sum()
     }
 
+    pub fn target_rate(&self, memory_safe_rate: FrameRate, consumer_rate: FrameRate) -> FrameRate {
+        self.request.target_rate(memory_safe_rate, consumer_rate)
+    }
+
     fn poll_objects(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), BoxError>> {
         let target = self.capacity_frames + self.prefetch_frames;
         let mut planned: usize = self.plans.iter().map(ObjectPlan::remaining).sum();
 
         while planned < target
-            && self.source_cursor < self.requested_frames.end
+            && self.source_cursor < self.request.frames().end
             && !self.objects.is_terminated()
         {
             let object = match self.objects.poll_next_unpin(cx) {
@@ -159,8 +163,9 @@ impl StreamSession {
                 .ok_or_else(|| message("global frame index overflow"))?;
             self.source_cursor = object_end;
 
-            let useful_start = object_start.max(self.requested_frames.start);
-            let useful_end = object_end.min(self.requested_frames.end);
+            let requested = self.request.frames();
+            let useful_start = object_start.max(requested.start);
+            let useful_end = object_end.min(requested.end);
             if useful_start >= useful_end {
                 continue;
             }
@@ -285,7 +290,7 @@ impl Stream for StreamSession {
             return Poll::Ready(Some(Ok(frame)));
         }
         if this.plans.is_empty()
-            && (this.objects.is_terminated() || this.source_cursor >= this.requested_frames.end)
+            && (this.objects.is_terminated() || this.source_cursor >= this.request.frames().end)
         {
             return Poll::Ready(None);
         }
@@ -360,7 +365,7 @@ mod tests {
     }
 
     fn request(frames: Range<u64>) -> StreamRequest {
-        StreamRequest::new(frames).unwrap()
+        StreamRequest::new(frames, FrameRate::new(1_000.0).unwrap()).unwrap()
     }
 
     #[tokio::test]

@@ -7,7 +7,8 @@ one ordered stream.
 
 The crate currently provides:
 
-- a frame-native `StreamRequest` containing only a global `Range<u64>`;
+- a frame-native `StreamRequest` containing a global `Range<u64>` and its
+  contractual maximum frame rate;
 - HTTP chunk-to-frame assembly with incomplete-body detection;
 - a cryptographic decoder boundary;
 - a global `FrameBudget` semaphore;
@@ -29,6 +30,10 @@ The scheduler, sizing policy, pacer, request and budget know only frames. A
 higher HTTP adapter is responsible for converting local frame ranges into
 physical byte ranges and for clipping decrypted first/last frames when a public
 API exposes byte-granular ranges.
+
+The effective target rate is the minimum of the request maximum, the consumer
+rate, and the memory-safe rate derived from the granted frame capacity. The
+`FramePacer` applies that target and can be updated when any limit changes.
 
 Network transport, signed-URL coordination, and concrete cryptography are not
 implemented yet. Their external contracts need to be specified before they can

@@ -16,6 +16,10 @@ impl FrameRate {
     pub const fn frames_per_second(self) -> f64 {
         self.0
     }
+
+    pub fn min(self, other: Self) -> Self {
+        Self(self.0.min(other.0))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -38,17 +42,18 @@ pub struct ObjectMeta {
     pub frame_count: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StreamRequest {
     frames: Range<u64>,
+    max_rate: FrameRate,
 }
 
 impl StreamRequest {
-    pub fn new(frames: Range<u64>) -> Result<Self, RequestError> {
+    pub fn new(frames: Range<u64>, max_rate: FrameRate) -> Result<Self, RequestError> {
         if frames.start >= frames.end {
             return Err(RequestError::EmptyFrameRange);
         }
-        Ok(Self { frames })
+        Ok(Self { frames, max_rate })
     }
 
     pub fn frames(&self) -> Range<u64> {
@@ -57,6 +62,14 @@ impl StreamRequest {
 
     pub fn frame_count(&self) -> u64 {
         self.frames.end - self.frames.start
+    }
+
+    pub const fn max_rate(&self) -> FrameRate {
+        self.max_rate
+    }
+
+    pub fn target_rate(&self, memory_safe_rate: FrameRate, consumer_rate: FrameRate) -> FrameRate {
+        self.max_rate.min(memory_safe_rate).min(consumer_rate)
     }
 }
 
@@ -76,3 +89,18 @@ impl fmt::Display for RequestError {
 }
 
 impl Error for RequestError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_rate_is_the_smallest_limit() {
+        let request = StreamRequest::new(0..10, FrameRate::new(763.0).unwrap()).unwrap();
+        let target = request.target_rate(
+            FrameRate::new(900.0).unwrap(),
+            FrameRate::new(500.0).unwrap(),
+        );
+        assert_eq!(target.frames_per_second(), 500.0);
+    }
+}
