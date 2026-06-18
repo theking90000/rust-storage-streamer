@@ -42,7 +42,7 @@ A small Cargo workspace, each crate with one job:
 | [`file-router`](crates/file-router/README.md)       | Axum router: SQLite catalog, segmented upload/download endpoints, AES-256-GCM, range requests. Backend-agnostic.                                                                                                |
 | [`discord`](crates/discord)                         | The storage backend — uploads/downloads through Discord webhooks, with rate-limit handling.                                                                                                                     |
 | [`discord-host`](crates/discord-host/README.md)     | The production server: wires `file-router` + `discord` together, adds CORS, and serves the web upload UI at `/`.                                                                                                |
-| [`cli`](crates/cli/README.md)                       | A minimal example client (`frame-streamer-cli`) driving a stream session over real HTTP.                                                                                                                        |
+| [`cli`](crates/cli/README.md)                       | `frame-streamer-cli` — uploads a file or a piped stream to the HTTP backend in parallel, with a live progress bar / throughput readout.                                                                          |
 
 ## Quick start
 
@@ -58,6 +58,23 @@ DH_WEBHOOKS_FILE=webhooks.txt cargo run -p discord-host
 
 The web UI shows live throughput and per-chunk progress. Downloads are linkable
 straight from the result.
+
+### From the command line
+
+`frame-streamer-cli` does the same upload pipeline as the web UI, from a file or
+a pipe, with a live progress bar and parallel segments:
+
+```sh
+# A file (progress bar: %, MB/s, ETA, blocks)
+cargo run -p cli -- ./video.mp4 --content-type video/mp4
+
+# A pipe / stdin (spinner: MB/s, blocks sent), 8-way parallel
+cat ./video.mp4 | cargo run -p cli -- --name video.mp4 -p 8
+```
+
+It prints the download URL to stdout. The backend defaults to
+`https://wd40.theking90000.be` and can be overridden with `-b/--backend` or the
+`WD40_BACKEND` env var — see the [`cli` README](crates/cli/README.md).
 
 ### HTTP API
 
