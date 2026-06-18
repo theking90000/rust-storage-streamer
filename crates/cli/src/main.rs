@@ -1,19 +1,18 @@
-use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use async_stream::try_stream;
 use bytes::Bytes;
 use frame_streamer::{
     BoxError, ByteRate, ByteRequest, ByteStream, ByteStreamConfig, ByteTransferModel, DecryptKey,
-    EncryptedByteStream, EncryptedBytesBackend, FrameBudget, ObjectId, ObjectMeta, SignedUrl,
-    UrlTicket,
+    FrameBudget, ObjectId, ObjectMeta,
 };
-use futures_util::{Sink, StreamExt, stream};
-use reqwest::header::RANGE;
+use futures_util::{Sink, stream};
 use tokio_into_sink::IntoSinkExt;
+
+mod measure;
+use measure::MeasureBackend;
 
 const FRAME_SIZE: usize = 1 << 16;
 const TOTAL_BYTES: u64 = 27_153_749;
@@ -48,49 +47,6 @@ impl Sink<Bytes> for OneFrameOutput {
     }
 }
 
-struct HttpBackend {
-    client: reqwest::Client,
-}
-
-impl EncryptedBytesBackend for HttpBackend {
-    fn resolve_url(&self, object: &ObjectMeta) -> UrlTicket {
-        let url = object.uri.clone();
-        Box::pin(async move { Ok(url) })
-    }
-
-    fn download(
-        &self,
-        object: &ObjectMeta,
-        url: SignedUrl,
-        physical_bytes: Range<u64>,
-    ) -> EncryptedByteStream {
-        let client = self.client.clone();
-        let id = object.id.as_str().to_owned();
-
-        Box::pin(try_stream! {
-            let expected = physical_bytes.end - physical_bytes.start;
-            let range = format!("bytes={}-{}", physical_bytes.start, physical_bytes.end - 1);
-            println!("GET {id} {range}");
-            let response = client
-                .get(url)
-                .header(RANGE, range)
-                .send()
-                .await?
-                .error_for_status()?;
-            let full_object = response.status() == reqwest::StatusCode::OK
-                && physical_bytes.start == 0
-                && response.content_length() == Some(expected);
-            if response.status() != reqwest::StatusCode::PARTIAL_CONTENT && !full_object {
-                Err(format!("{id}: server ignored the Range request"))?;
-            }
-            let mut body = response.bytes_stream();
-            while let Some(chunk) = body.next().await {
-                yield chunk?;
-            }
-        })
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     let catalog = vec![
@@ -111,9 +67,12 @@ async fn main() -> Result<(), BoxError> {
         ),
     ];
     let objects = stream::iter(catalog.into_iter().map(Ok::<_, BoxError>));
-    let backend = Arc::new(HttpBackend {
-        client: reqwest::Client::new(),
-    });
+    let backend = Arc::new(MeasureBackend::new(
+        reqwest::Client::new(),
+        "metrics",
+        FRAME_SIZE,
+        TARGET_RATE,
+    ));
     let config = ByteStreamConfig::new(
         FRAME_SIZE,
         ByteRate::new(TARGET_RATE)?,
@@ -126,11 +85,12 @@ async fn main() -> Result<(), BoxError> {
     )?;
     let stream = ByteStream::new(
         objects,
-        backend,
+        backend.clone(),
         ByteRequest::new(0..TOTAL_BYTES, ByteRate::new(TARGET_RATE)?)?,
         FrameBudget::new(415)?,
         config,
     )?;
+    backend.set_window_frames(stream.capacity_frames());
     println!(
         "target={:.3} Mbit/s, window={} frames",
         TARGET_RATE * 8.0 / 1_000_000.0,
@@ -161,12 +121,18 @@ async fn main() -> Result<(), BoxError> {
         start.elapsed().as_secs_f64(),
         TOTAL_BYTES as f64 * 8.0 / start.elapsed().as_secs_f64() / 1_000_000.0,
     );
+    println!("dropped metric samples: {}", backend.dropped_samples());
     Ok(())
 }
 
 fn object(id: &str, frame_count: u32, key: &str) -> ObjectMeta {
     ObjectMeta {
-        id: ObjectId::new(id),
+        id: ObjectId::new(
+            reqwest::Url::parse(id)
+                .ok()
+                .and_then(|url| url.path_segments()?.next_back().map(str::to_owned))
+                .unwrap_or_else(|| id.to_owned()),
+        ),
         uri: format!("http://192.168.129.87:8080/{id}"),
         frame_count,
         decrypt_key: hex_key(key),
