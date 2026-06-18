@@ -1,20 +1,17 @@
 # s-streamer
 
-Async streaming primitives for mapping a logical byte range onto framed HTTP
-objects. The implementation is being built from the pure, testable core
-outward: planning first, then framing, budgets, HTTP, URL coordination, and the
-streaming pipeline.
+Async streaming primitives for turning a lazy sequence of framed objects into
+one ordered stream.
 
 ## Implemented core
 
 The crate currently provides:
 
-- a validated request model with explicit final-object frame counts;
-- a planner mapping logical ranges to complete, object-local encrypted frames;
+- a frame-native `StreamRequest` containing only a global `Range<u64>`;
 - HTTP chunk-to-frame assembly with incomplete-body detection;
-- a cryptographic decoder boundary and zero-copy logical clipping;
-- a coarse global memory budget that never exceeds its configured hard limit;
-- a per-stream token-bucket pacer that also handles writes larger than its burst;
+- a cryptographic decoder boundary;
+- a global `FrameBudget` semaphore;
+- a frame-per-second token-bucket pacer;
 - a sizing policy converting target rates and measured latencies into frame counts;
 - a single-owner `StreamSession` that polls its lazy object source, URL tickets,
   sequential object downloads, and per-object frame buffers;
@@ -27,6 +24,11 @@ authorized, and polls each sequential download only up to its authorization.
 Output pops exclusively from the front object's buffer, keeping head-of-line
 ordering explicit without channels, detached tasks, global frame slots, or a
 separate action queue.
+
+The scheduler, sizing policy, pacer, request and budget know only frames. A
+higher HTTP adapter is responsible for converting local frame ranges into
+physical byte ranges and for clipping decrypted first/last frames when a public
+API exposes byte-granular ranges.
 
 Network transport, signed-URL coordination, and concrete cryptography are not
 implemented yet. Their external contracts need to be specified before they can

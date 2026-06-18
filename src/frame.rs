@@ -69,8 +69,6 @@ pub trait FrameDecoder {
 pub enum FrameError {
     ZeroFrameSize,
     IncompleteFrame { expected: usize, actual: usize },
-    UnexpectedPayloadSize { expected: usize, actual: usize },
-    FrameOutsidePlan { frame_index: u64 },
 }
 
 impl fmt::Display for FrameError {
@@ -81,12 +79,6 @@ impl fmt::Display for FrameError {
                 f,
                 "HTTP body ended with an incomplete frame: expected {expected} bytes, got {actual}"
             ),
-            Self::UnexpectedPayloadSize { expected, actual } => {
-                write!(f, "decoded frame has {actual} bytes; expected {expected}")
-            }
-            Self::FrameOutsidePlan { frame_index } => {
-                write!(f, "frame {frame_index} is outside this object read plan")
-            }
         }
     }
 }

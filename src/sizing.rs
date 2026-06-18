@@ -2,74 +2,53 @@ use std::error::Error;
 use std::fmt;
 use std::time::Duration;
 
-use crate::ByteRate;
+use crate::FrameRate;
 
-/// Inputs used by the policy layer to turn time and throughput constraints
-/// into frame counts. The window controller itself only consumes those counts.
 #[derive(Clone, Copy, Debug)]
 pub struct WindowSizingInput {
-    pub target_rate: ByteRate,
-    pub object_download_rate: ByteRate,
+    pub target_rate: FrameRate,
+    pub object_download_rate: FrameRate,
     pub data_ttfb: Duration,
     pub url_fetch_latency: Duration,
-    pub frame_payload_size: u64,
     pub frames_per_object: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowSizing {
-    /// Minimum theoretical Ready + Data capacity for continuous delivery.
     pub ready_data_frames: u64,
-    /// Additional logical look-ahead used to start URL resolution.
     pub url_prefetch_frames: u64,
 }
 
 impl WindowSizing {
     pub fn calculate(input: WindowSizingInput) -> Result<Self, WindowSizingError> {
-        if input.frame_payload_size == 0 {
-            return Err(WindowSizingError::ZeroFramePayloadSize);
-        }
         if input.frames_per_object == 0 {
             return Err(WindowSizingError::ZeroFramesPerObject);
         }
-
-        let frame_payload = input.frame_payload_size as f64;
-        let target_rate = input.target_rate.bytes_per_second() as f64;
-        let download_rate = input.object_download_rate.bytes_per_second() as f64;
-        let object_size = frame_payload * f64::from(input.frames_per_object);
+        let target = input.target_rate.frames_per_second();
+        let download = input.object_download_rate.frames_per_second();
+        let object = f64::from(input.frames_per_object);
         let ttfb = input.data_ttfb.as_secs_f64();
 
-        // The first constraint makes the first byte available before output
-        // reaches the object. The second lets the tail keep downloading while
-        // the object's prefix is already being delivered.
-        let first_byte_bytes = target_rate * ttfb;
-        let completion_bytes = target_rate * (ttfb + object_size / download_rate) - object_size;
-        let ready_data_bytes = first_byte_bytes.max(completion_bytes).max(frame_payload);
-
-        let ready_data_frames = ceil_frames(ready_data_bytes, frame_payload)?;
-        let url_prefetch_frames = ceil_frames(
-            target_rate * input.url_fetch_latency.as_secs_f64(),
-            frame_payload,
-        )?;
+        let first_frame = target * ttfb;
+        let complete_object = target * (ttfb + object / download) - object;
 
         Ok(Self {
-            ready_data_frames,
-            url_prefetch_frames,
+            ready_data_frames: frames(first_frame.max(complete_object).max(1.0))?,
+            url_prefetch_frames: frames(target * input.url_fetch_latency.as_secs_f64())?,
         })
     }
 }
 
-fn ceil_frames(bytes: f64, frame_payload: f64) -> Result<u64, WindowSizingError> {
-    let frames = (bytes / frame_payload).ceil();
-    if !frames.is_finite() || frames > u64::MAX as f64 {
+fn frames(value: f64) -> Result<u64, WindowSizingError> {
+    let value = value.ceil();
+    if !value.is_finite() || value > u64::MAX as f64 {
         return Err(WindowSizingError::FrameCountOverflow);
     }
-    Ok(frames as u64)
+    Ok(value as u64)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowSizingError {
-    ZeroFramePayloadSize,
     ZeroFramesPerObject,
     FrameCountOverflow,
 }
@@ -77,7 +56,6 @@ pub enum WindowSizingError {
 impl fmt::Display for WindowSizingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ZeroFramePayloadSize => f.write_str("frame payload size must be positive"),
             Self::ZeroFramesPerObject => f.write_str("frames per object must be positive"),
             Self::FrameCountOverflow => f.write_str("calculated frame count overflows u64"),
         }
@@ -90,55 +68,22 @@ impl Error for WindowSizingError {}
 mod tests {
     use super::*;
 
-    fn rate(bytes_per_second: u64) -> ByteRate {
-        ByteRate::new(bytes_per_second).unwrap()
+    fn rate(frames_per_second: f64) -> FrameRate {
+        FrameRate::new(frames_per_second).unwrap()
     }
 
     #[test]
-    fn reproduces_the_reference_50_mb_per_second_window() {
+    fn sizes_the_reference_window_without_knowing_frame_bytes() {
         let sizing = WindowSizing::calculate(WindowSizingInput {
-            target_rate: rate(50_000_000),
-            object_download_rate: rate(20_000_000),
+            target_rate: rate(50_000_000.0 / 65_520.0),
+            object_download_rate: rate(20_000_000.0 / 65_520.0),
             data_ttfb: Duration::from_millis(300),
             url_fetch_latency: Duration::from_secs(1),
-            frame_payload_size: 65_520,
             frames_per_object: 150,
         })
         .unwrap();
 
         assert_eq!(sizing.ready_data_frames, 454);
         assert_eq!(sizing.url_prefetch_frames, 764);
-    }
-
-    #[test]
-    fn supports_the_conservative_download_assumptions() {
-        let sizing = WindowSizing::calculate(WindowSizingInput {
-            target_rate: rate(50_000_000),
-            object_download_rate: rate(10_000_000),
-            data_ttfb: Duration::from_secs(1),
-            url_fetch_latency: Duration::from_secs(1),
-            frame_payload_size: 65_520,
-            frames_per_object: 150,
-        })
-        .unwrap();
-
-        assert_eq!(sizing.ready_data_frames, 1_364);
-        assert_eq!(sizing.url_prefetch_frames, 764);
-    }
-
-    #[test]
-    fn always_keeps_at_least_one_frame() {
-        let sizing = WindowSizing::calculate(WindowSizingInput {
-            target_rate: rate(1),
-            object_download_rate: rate(1_000_000),
-            data_ttfb: Duration::ZERO,
-            url_fetch_latency: Duration::ZERO,
-            frame_payload_size: 65_520,
-            frames_per_object: 150,
-        })
-        .unwrap();
-
-        assert_eq!(sizing.ready_data_frames, 1);
-        assert_eq!(sizing.url_prefetch_frames, 0);
     }
 }

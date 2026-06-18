@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::error::Error;
 use std::future::Future;
 use std::io;
+use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -10,7 +11,7 @@ use bytes::Bytes;
 use futures_util::stream::{Fuse, FusedStream};
 use futures_util::{Stream, StreamExt};
 
-use crate::ObjectMeta;
+use crate::{ObjectMeta, StreamRequest};
 
 pub type BoxError = Box<dyn Error + Send + Sync>;
 pub type SignedUrl = String;
@@ -24,8 +25,8 @@ pub trait StreamBackend: Send + Sync {
     /// polled later; resolution itself must not wait for that first poll.
     fn resolve_url(&self, object: &ObjectMeta) -> UrlTicket;
 
-    /// Opens one sequential stream of decrypted frames for the whole object.
-    fn download(&self, object: &ObjectMeta, url: SignedUrl) -> FrameStream;
+    /// Opens one sequential stream for the useful local frame range.
+    fn download(&self, object: &ObjectMeta, url: SignedUrl, frames: Range<u32>) -> FrameStream;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +51,7 @@ impl StreamConfig {
 /// enough; later objects may fill theirs while the front object blocks output.
 pub struct ObjectPlan {
     object: ObjectMeta,
+    local_frames: Range<u32>,
     ticket: Option<UrlTicket>,
     download: Option<FrameStream>,
     authorized: u32,
@@ -64,15 +66,19 @@ impl ObjectPlan {
     }
 
     pub const fn authorized_frames(&self) -> u32 {
-        self.authorized
+        self.authorized - self.local_frames.start
     }
 
     pub fn buffered_frames(&self) -> usize {
         self.buffer.len()
     }
 
+    pub fn local_frames(&self) -> Range<u32> {
+        self.local_frames.clone()
+    }
+
     fn remaining(&self) -> usize {
-        (self.object.frame_count - self.emitted) as usize
+        (self.local_frames.end - self.emitted) as usize
     }
 
     fn committed(&self) -> usize {
@@ -88,12 +94,15 @@ pub struct StreamSession {
     plans: VecDeque<ObjectPlan>,
     capacity_frames: usize,
     prefetch_frames: usize,
+    requested_frames: Range<u64>,
+    source_cursor: u64,
 }
 
 impl StreamSession {
     pub fn new(
         objects: impl Stream<Item = Result<ObjectMeta, BoxError>> + Send + 'static,
         backend: Arc<dyn StreamBackend>,
+        request: StreamRequest,
         config: StreamConfig,
     ) -> Self {
         let objects: ObjectStream = Box::pin(objects);
@@ -103,6 +112,8 @@ impl StreamSession {
             plans: VecDeque::new(),
             capacity_frames: config.capacity_frames,
             prefetch_frames: config.prefetch_frames,
+            requested_frames: request.frames(),
+            source_cursor: 0,
         }
     }
 
@@ -130,7 +141,10 @@ impl StreamSession {
         let target = self.capacity_frames + self.prefetch_frames;
         let mut planned: usize = self.plans.iter().map(ObjectPlan::remaining).sum();
 
-        while planned < target && !self.objects.is_terminated() {
+        while planned < target
+            && self.source_cursor < self.requested_frames.end
+            && !self.objects.is_terminated()
+        {
             let object = match self.objects.poll_next_unpin(cx) {
                 Poll::Ready(Some(Ok(object))) => object,
                 Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error)),
@@ -139,15 +153,30 @@ impl StreamSession {
             if object.frame_count == 0 {
                 return Poll::Ready(Err(message("object contains no frames")));
             }
-            planned += object.frame_count as usize;
+            let object_start = self.source_cursor;
+            let object_end = object_start
+                .checked_add(u64::from(object.frame_count))
+                .ok_or_else(|| message("global frame index overflow"))?;
+            self.source_cursor = object_end;
+
+            let useful_start = object_start.max(self.requested_frames.start);
+            let useful_end = object_end.min(self.requested_frames.end);
+            if useful_start >= useful_end {
+                continue;
+            }
+            let local_frames =
+                (useful_start - object_start) as u32..(useful_end - object_start) as u32;
+            planned += local_frames.len();
             let ticket = self.backend.resolve_url(&object);
+            let first_frame = local_frames.start;
             self.plans.push_back(ObjectPlan {
                 object,
+                local_frames,
                 ticket: Some(ticket),
                 download: None,
-                authorized: 0,
-                received: 0,
-                emitted: 0,
+                authorized: first_frame,
+                received: first_frame,
+                emitted: first_frame,
                 buffer: VecDeque::new(),
             });
         }
@@ -162,7 +191,7 @@ impl StreamSession {
             if available == 0 {
                 break;
             }
-            let missing = (plan.object.frame_count - plan.authorized) as usize;
+            let missing = (plan.local_frames.end - plan.authorized) as usize;
             let added = missing.min(available);
             plan.authorized += added as u32;
             available -= added;
@@ -179,7 +208,11 @@ impl StreamSession {
             };
             match ticket.as_mut().poll(cx) {
                 Poll::Ready(Ok(url)) => {
-                    plan.download = Some(self.backend.download(&plan.object, url));
+                    plan.download = Some(self.backend.download(
+                        &plan.object,
+                        url,
+                        plan.local_frames.clone(),
+                    ));
                     plan.ticket = None;
                 }
                 Poll::Ready(Err(error)) => {
@@ -222,7 +255,7 @@ impl StreamSession {
         let plan = self.plans.front_mut()?;
         let frame = plan.buffer.pop_front()?;
         plan.emitted += 1;
-        if plan.emitted == plan.object.frame_count {
+        if plan.emitted == plan.local_frames.end {
             self.plans.pop_front();
         }
         Some(frame)
@@ -251,7 +284,9 @@ impl Stream for StreamSession {
         if let Some(frame) = this.pop_ready() {
             return Poll::Ready(Some(Ok(frame)));
         }
-        if this.objects.is_terminated() && this.plans.is_empty() {
+        if this.plans.is_empty()
+            && (this.objects.is_terminated() || this.source_cursor >= this.requested_frames.end)
+        {
             return Poll::Ready(None);
         }
         if progressed {
@@ -290,14 +325,18 @@ mod tests {
             Box::pin(future::ready(Ok(object.uri.clone())))
         }
 
-        fn download(&self, object: &ObjectMeta, _url: SignedUrl) -> FrameStream {
+        fn download(
+            &self,
+            object: &ObjectMeta,
+            _url: SignedUrl,
+            frames: Range<u32>,
+        ) -> FrameStream {
             if self.block_first && object.id.as_str() == "object-0" {
                 return Box::pin(stream::pending());
             }
             let id = object.id.as_str().to_owned();
-            let frames =
-                (0..object.frame_count).map(move |frame| Ok(Bytes::from(format!("{id}:{frame}"))));
-            Box::pin(stream::iter(frames))
+            let output = frames.map(move |frame| Ok(Bytes::from(format!("{id}:{frame}"))));
+            Box::pin(stream::iter(output))
         }
     }
 
@@ -320,6 +359,10 @@ mod tests {
         ))
     }
 
+    fn request(frames: Range<u64>) -> StreamRequest {
+        StreamRequest::new(frames).unwrap()
+    }
+
     #[tokio::test]
     async fn emits_frames_in_object_order() {
         let backend = Arc::new(TestBackend {
@@ -327,7 +370,7 @@ mod tests {
             panic_second_url: false,
         });
         let config = StreamConfig::new(3, 3).unwrap();
-        let session = StreamSession::new(objects(&[2, 2]), backend, config);
+        let session = StreamSession::new(objects(&[2, 2]), backend, request(0..4), config);
 
         let frames: Vec<_> = session.try_collect().await.unwrap();
         let text: Vec<_> = frames.iter().map(|frame| &frame[..]).collect();
@@ -344,7 +387,7 @@ mod tests {
             panic_second_url: false,
         });
         let config = StreamConfig::new(4, 0).unwrap();
-        let mut session = StreamSession::new(objects(&[2, 2]), backend, config);
+        let mut session = StreamSession::new(objects(&[2, 2]), backend, request(0..4), config);
         let mut cx = Context::from_waker(noop_waker_ref());
 
         assert!(Pin::new(&mut session).poll_next(&mut cx).is_pending());
@@ -360,7 +403,7 @@ mod tests {
             panic_second_url: true,
         });
         let config = StreamConfig::new(1, 3).unwrap();
-        let mut session = StreamSession::new(objects(&[2, 2]), backend, config);
+        let mut session = StreamSession::new(objects(&[2, 2]), backend, request(0..4), config);
         let mut cx = Context::from_waker(noop_waker_ref());
 
         assert!(Pin::new(&mut session).poll_next(&mut cx).is_pending());
@@ -375,11 +418,25 @@ mod tests {
             panic_second_url: false,
         });
         let config = StreamConfig::new(1, 0).unwrap();
-        let mut session = StreamSession::new(objects(&[3]), backend, config);
+        let mut session = StreamSession::new(objects(&[3]), backend, request(0..3), config);
 
         assert_eq!(session.next().await.unwrap().unwrap(), "object-0:0");
         session.set_capacity_frames(3).unwrap();
         assert_eq!(session.next().await.unwrap().unwrap(), "object-0:1");
         assert_eq!(session.plans()[0].authorized_frames(), 3);
+    }
+
+    #[tokio::test]
+    async fn requests_only_intersecting_frames() {
+        let backend = Arc::new(TestBackend {
+            block_first: false,
+            panic_second_url: false,
+        });
+        let config = StreamConfig::new(3, 0).unwrap();
+        let session = StreamSession::new(objects(&[3, 3]), backend, request(2..5), config);
+
+        let frames: Vec<_> = session.try_collect().await.unwrap();
+        let text: Vec<_> = frames.iter().map(|frame| &frame[..]).collect();
+        assert_eq!(text, [b"object-0:2", b"object-1:0", b"object-1:1"]);
     }
 }
