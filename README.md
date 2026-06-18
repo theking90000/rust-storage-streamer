@@ -20,8 +20,9 @@ The crate currently provides:
   stops new authorization and releases memory as committed frames drain.
 
 `StreamSession` implements `Stream<Item = Result<Bytes, BoxError>>` directly.
-It polls an object's URL ticket only after at least one of its frames is
-authorized, and polls each sequential download only up to its authorization.
+It polls every URL ticket inside the prefetch window, but opens an object's
+download only after at least one frame is authorized. Each sequential download
+is then polled only up to that authorization.
 Output pops exclusively from the front object's buffer, keeping head-of-line
 ordering explicit without channels, detached tasks, global frame slots, or a
 separate action queue.

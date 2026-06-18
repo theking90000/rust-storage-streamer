@@ -9,6 +9,7 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures_util::stream::{Fuse, FusedStream};
+use futures_util::task::noop_waker_ref;
 use futures_util::{Stream, StreamExt};
 
 use crate::{FrameBudget, FrameBudgetError, FramePermit, FrameRate, ObjectMeta, StreamRequest};
@@ -23,8 +24,8 @@ type BudgetTicket = Pin<Box<dyn Future<Output = Result<FramePermit, FrameBudgetE
 
 /// The URL coordinator and HTTP/crypto pipeline seen by a stream session.
 pub trait StreamBackend: Send + Sync {
-    /// Starts or joins URL resolution immediately. The returned ticket may be
-    /// polled later; resolution itself must not wait for that first poll.
+    /// Creates an owned URL-resolution future. The session polls it while the
+    /// object is inside its prefetch window.
     fn resolve_url(&self, object: &ObjectMeta) -> UrlTicket;
 
     /// Opens one sequential stream for the useful local frame range.
@@ -53,6 +54,7 @@ pub struct ObjectPlan {
     object: ObjectMeta,
     local_frames: Range<u32>,
     ticket: Option<UrlTicket>,
+    url: Option<SignedUrl>,
     download: Option<FrameStream>,
     authorized: u32,
     received: u32,
@@ -258,6 +260,7 @@ impl StreamSession {
                 object,
                 local_frames,
                 ticket: Some(ticket),
+                url: None,
                 download: None,
                 authorized: first_frame,
                 received: first_frame,
@@ -284,20 +287,26 @@ impl StreamSession {
     }
 
     fn poll_urls(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), BoxError>> {
+        let mut speculative_cx = Context::from_waker(noop_waker_ref());
+        let mut limiting_ticket_seen = false;
+
         for plan in &mut self.plans {
-            if plan.authorized == plan.emitted || plan.download.is_some() {
-                continue;
-            }
             let Some(ticket) = &mut plan.ticket else {
                 continue;
             };
-            match ticket.as_mut().poll(cx) {
+
+            let is_limiting =
+                !limiting_ticket_seen && plan.authorized > plan.emitted && plan.download.is_none();
+            limiting_ticket_seen |= is_limiting;
+            let ticket_cx = if is_limiting {
+                &mut *cx
+            } else {
+                &mut speculative_cx
+            };
+
+            match ticket.as_mut().poll(ticket_cx) {
                 Poll::Ready(Ok(url)) => {
-                    plan.download = Some(self.backend.download(
-                        &plan.object,
-                        url,
-                        plan.local_frames.clone(),
-                    ));
+                    plan.url = Some(url);
                     plan.ticket = None;
                 }
                 Poll::Ready(Err(error)) => {
@@ -305,6 +314,19 @@ impl StreamSession {
                     return Poll::Ready(Err(error));
                 }
                 Poll::Pending => {}
+            }
+        }
+
+        for plan in &mut self.plans {
+            if plan.authorized == plan.emitted || plan.download.is_some() {
+                continue;
+            }
+            if let Some(url) = plan.url.take() {
+                plan.download = Some(self.backend.download(
+                    &plan.object,
+                    url,
+                    plan.local_frames.clone(),
+                ));
             }
         }
         Poll::Ready(Ok(()))
@@ -394,10 +416,10 @@ fn message(text: &str) -> BoxError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Context;
     use std::time::Duration;
 
-    use futures_util::future;
     use futures_util::stream;
     use futures_util::task::noop_waker_ref;
     use futures_util::{StreamExt, TryStreamExt};
@@ -405,17 +427,20 @@ mod tests {
     use super::*;
     use crate::ObjectId;
 
+    #[derive(Default)]
     struct TestBackend {
         block_first: bool,
-        panic_second_url: bool,
+        polled_urls: Arc<AtomicUsize>,
     }
 
     impl StreamBackend for TestBackend {
         fn resolve_url(&self, object: &ObjectMeta) -> UrlTicket {
-            if self.panic_second_url && object.id.as_str() == "object-1" {
-                return Box::pin(async { panic!("prefetched URL ticket was polled") });
-            }
-            Box::pin(future::ready(Ok(object.uri.clone())))
+            let url = object.uri.clone();
+            let polled_urls = self.polled_urls.clone();
+            Box::pin(async move {
+                polled_urls.fetch_add(1, Ordering::Relaxed);
+                Ok(url)
+            })
         }
 
         fn download(
@@ -474,7 +499,7 @@ mod tests {
     async fn emits_frames_in_object_order() {
         let backend = Arc::new(TestBackend {
             block_first: false,
-            panic_second_url: false,
+            ..Default::default()
         });
         let session = StreamSession::new(
             objects(&[2, 2]),
@@ -497,7 +522,7 @@ mod tests {
     fn buffers_future_objects_without_bypassing_head_of_line() {
         let backend = Arc::new(TestBackend {
             block_first: true,
-            panic_second_url: false,
+            ..Default::default()
         });
         let mut session = StreamSession::new(
             objects(&[2, 2]),
@@ -516,14 +541,14 @@ mod tests {
     }
 
     #[test]
-    fn does_not_poll_prefetched_url_without_data_capacity() {
+    fn polls_prefetched_url_without_opening_its_download() {
         let backend = Arc::new(TestBackend {
             block_first: true,
-            panic_second_url: true,
+            ..Default::default()
         });
         let mut session = StreamSession::new(
             objects(&[2, 2]),
-            backend,
+            backend.clone(),
             request(0..4),
             FrameBudget::new(4).unwrap(),
             config(1, 3),
@@ -533,14 +558,16 @@ mod tests {
 
         assert!(Pin::new(&mut session).poll_next(&mut cx).is_pending());
         assert_eq!(session.plans().len(), 2);
+        assert_eq!(backend.polled_urls.load(Ordering::Relaxed), 2);
         assert_eq!(session.plans()[1].authorized_frames(), 0);
+        assert!(session.plans()[1].download.is_none());
     }
 
     #[tokio::test]
     async fn capacity_can_change_while_streaming() {
         let backend = Arc::new(TestBackend {
             block_first: false,
-            panic_second_url: false,
+            ..Default::default()
         });
         let mut session = StreamSession::new(
             objects(&[3]),
@@ -561,7 +588,7 @@ mod tests {
     async fn shrinking_waits_for_committed_frames_to_drain() {
         let backend = Arc::new(TestBackend {
             block_first: false,
-            panic_second_url: false,
+            ..Default::default()
         });
         let budget = FrameBudget::new(3).unwrap();
         let mut session = StreamSession::new(
@@ -585,7 +612,7 @@ mod tests {
     async fn requests_only_intersecting_frames() {
         let backend = Arc::new(TestBackend {
             block_first: false,
-            panic_second_url: false,
+            ..Default::default()
         });
         let session = StreamSession::new(
             objects(&[3, 3]),
@@ -605,7 +632,7 @@ mod tests {
     fn global_budget_caps_the_window_and_target_rate() {
         let backend = Arc::new(TestBackend {
             block_first: true,
-            panic_second_url: false,
+            ..Default::default()
         });
         let session = StreamSession::new(
             objects(&[10]),
@@ -626,7 +653,7 @@ mod tests {
         let backend = || {
             Arc::new(TestBackend {
                 block_first: true,
-                panic_second_url: false,
+                ..Default::default()
             })
         };
         let holder = StreamSession::new(
