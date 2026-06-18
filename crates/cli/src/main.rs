@@ -16,8 +16,8 @@ use measure::MeasureBackend;
 
 const FRAME_SIZE: usize = 1 << 16;
 const TOTAL_BYTES: u64 = 27_153_749;
-const OBJECT_RATE: f64 = 500_000.0;
-const TARGET_RATE: f64 = OBJECT_RATE * 3.0;
+const OBJECT_RATE: f64 = 60_000_000.0;
+const TARGET_RATE: f64 = OBJECT_RATE * 10.0; // OBJECT_RATE * 3.0;
 
 struct OneFrameOutput(Option<Bytes>);
 
@@ -51,17 +51,17 @@ impl Sink<Bytes> for OneFrameOutput {
 async fn main() -> Result<(), BoxError> {
     let catalog = vec![
         object(
-            "flux.1",
+            "https://cdn.discordapp.com/attachments/1517138836453589052/1517202414241976441/flux.1?ex=6a356c5b&is=6a341adb&hm=0c586e1001d572690535fffad9298aaba7c6cf09d4b42ae85e290f4158f9e444&",
             150,
             "e14c08356134cb311e1ab933c6d3fc421fb43e5fbc97997470cecb4ca5e5a3e3",
         ),
         object(
-            "flux.2",
+            "https://cdn.discordapp.com/attachments/1517138836453589052/1517202424052449550/flux.2?ex=6a356c5e&is=6a341ade&hm=09cb534967a77db375bc9ee36eabcd276bfc752d01a26b50c3257bceb0179d76&",
             150,
             "45b481e3033561e4f4bd884ce9e875cc932b7d5d94c0a7f22a94bc9305ef7d97",
         ),
         object(
-            "flux.3",
+            "https://cdn.discordapp.com/attachments/1517138836453589052/1517202435184005181/flux.3?ex=6a356c60&is=6a341ae0&hm=4b6a0c8c75df92f4598c9edb7bb8c6536dc3d5950c9b80e1daec2a75b38372cf&",
             115,
             "688172a63bc45555f6b7565d64f814cb2a95fcdd34c61c3b134b29209926d1b2",
         ),
@@ -78,7 +78,7 @@ async fn main() -> Result<(), BoxError> {
         ByteRate::new(TARGET_RATE)?,
         ByteTransferModel {
             object_rate: ByteRate::new(OBJECT_RATE)?,
-            data_ttfb: Duration::from_millis(500),
+            data_ttfb: Duration::from_millis(100),
             url_latency: Duration::ZERO,
             frames_per_object: 150,
         },
@@ -133,7 +133,8 @@ fn object(id: &str, frame_count: u32, key: &str) -> ObjectMeta {
                 .and_then(|url| url.path_segments()?.next_back().map(str::to_owned))
                 .unwrap_or_else(|| id.to_owned()),
         ),
-        uri: format!("http://192.168.129.87:8080/{id}"),
+        uri: id.to_owned(),
+        //uri: format!("http://192.168.129.87:8080/{id}"),
         frame_count,
         decrypt_key: hex_key(key),
     }
