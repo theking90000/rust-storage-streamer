@@ -13,6 +13,7 @@ file-router = { path = "../file-router" }
 discord = { path = "../discord" }
 frame-streamer.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "fs"] }
+tower-http.workspace = true
 axum.workspace = true
 serde.workspace = true
 toml.workspace = true

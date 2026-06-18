@@ -9,6 +9,7 @@ use file_router::{AppState, Catalog, ServerConfig, router};
 use frame_streamer::{
     BoxError, ByteRate, ByteStreamConfig, ByteTransferModel, FrameBudget,
 };
+use tower_http::cors::{Any, CorsLayer};
 
 /// Discord caps each object at 150 physical frames; must match the upload backend.
 const FRAMES_PER_OBJECT: u32 = 150;
@@ -53,7 +54,11 @@ async fn main() -> Result<(), BoxError> {
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     eprintln!("discord-host listening on {}", listener.local_addr()?);
-    axum::serve(listener, router(state))
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+    axum::serve(listener, router(state).layer(cors))
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c().await.ok();
         })
