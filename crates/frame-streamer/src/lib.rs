@@ -19,6 +19,6 @@ pub use stream::{
     UrlTicket,
 };
 pub use upload::{
-    ByteUpload, EncryptedBytesUploadBackend, StoredObject, StreamUploadBackend, UploadBackend,
-    UploadError, UploadObject, UploadResult,
+    ByteUpload, DeleteFuture, EncryptedBytesUploadBackend, StoredObject, StreamUploadBackend,
+    UploadBackend, UploadByteStream, UploadError, UploadFuture, UploadObject, UploadResult,
 };
