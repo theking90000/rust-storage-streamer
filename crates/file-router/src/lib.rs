@@ -236,10 +236,10 @@ async fn download_file(
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, length.to_string())
         .header(header::CONTENT_TYPE, file.content_type)
-        /*.header(
+        .header(
             header::CONTENT_DISPOSITION,
             content_disposition(&file.name),
-        )*/;
+        );
     if partial {
         builder = builder.header(
             header::CONTENT_RANGE,
@@ -343,7 +343,7 @@ fn content_disposition(name: &str) -> String {
             encoded.push(char::from_digit((byte & 15) as u32, 16).unwrap());
         }
     }
-    format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
+    format!("inline; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
 }
 
 fn hex(bytes: &[u8]) -> String {
