@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_stream::try_stream;
 use frame_streamer::{
-    EncryptedByteStream, EncryptedBytesBackend, ObjectMeta, SignedUrl, UrlTicket,
+    EncryptedByteStream, EncryptedBytesDownloadBackend, ObjectMeta, SignedUrl, UrlTicket,
 };
 use futures_util::StreamExt;
 use reqwest::header::RANGE;
@@ -49,7 +49,7 @@ impl MeasureBackend {
     }
 }
 
-impl EncryptedBytesBackend for MeasureBackend {
+impl EncryptedBytesDownloadBackend for MeasureBackend {
     fn resolve_url(&self, object: &ObjectMeta) -> UrlTicket {
         let id = object.id.as_str().to_owned();
         let url = object.uri.clone();
@@ -57,7 +57,7 @@ impl EncryptedBytesBackend for MeasureBackend {
         Box::pin(async move {
             let started = Instant::now();
             resolves.lock().unwrap().insert(id, started.elapsed());
-            Ok(url)
+            Ok(SignedUrl::new(url, None))
         })
     }
 
@@ -69,7 +69,7 @@ impl EncryptedBytesBackend for MeasureBackend {
     ) -> EncryptedByteStream {
         let client = self.client.clone();
         let id = object.id.as_str().to_owned();
-        let host = reqwest::Url::parse(&url)
+        let host = reqwest::Url::parse(url.as_str())
             .ok()
             .and_then(|url| url.host_str().map(str::to_owned))
             .unwrap_or_default();
@@ -107,7 +107,7 @@ impl EncryptedBytesBackend for MeasureBackend {
                 result: "cancelled".into(),
             }, started);
 
-            let response = match client.get(url).header(RANGE, range).send().await {
+            let response = match client.get(url.as_str()).header(RANGE, range).send().await {
                 Ok(response) => response,
                 Err(error) => {
                     sample.fail(format!("request: {error}"));

@@ -12,5 +12,6 @@ path = "src/lib.rs"
 aes-gcm.workspace = true
 async-stream.workspace = true
 bytes.workspace = true
+blake3.workspace = true
 futures-util.workspace = true
 tokio.workspace = true

@@ -63,6 +63,47 @@ pub struct FrameDecoder {
     cipher: Aes256Gcm,
 }
 
+/// AES-256-GCM encoder for one object. Frames are `tag || ciphertext`.
+pub struct FrameEncoder {
+    payload_size: usize,
+    cipher: Aes256Gcm,
+}
+
+impl FrameEncoder {
+    pub fn new(frame_size: usize, key: &DecryptKey) -> Result<Self, FrameError> {
+        if frame_size <= TAG_SIZE {
+            return Err(FrameError::FrameTooSmall);
+        }
+        Ok(Self {
+            payload_size: frame_size - TAG_SIZE,
+            cipher: Aes256Gcm::new(key.as_bytes().into()),
+        })
+    }
+
+    pub fn encode_frame(
+        &self,
+        mut payload: BytesMut,
+        local_frame_index: u64,
+    ) -> Result<Bytes, FrameError> {
+        if payload.len() != self.payload_size {
+            return Err(FrameError::InvalidFrameSize {
+                expected: self.payload_size,
+                actual: payload.len(),
+            });
+        }
+        let mut nonce = [0; 12];
+        nonce[4..].copy_from_slice(&local_frame_index.to_be_bytes());
+        let tag = self
+            .cipher
+            .encrypt_in_place_detached(Nonce::from_slice(&nonce), b"", &mut payload)
+            .map_err(|_| FrameError::AuthenticationFailed)?;
+        let mut encrypted = BytesMut::with_capacity(TAG_SIZE + payload.len());
+        encrypted.extend_from_slice(&tag);
+        encrypted.extend_from_slice(&payload);
+        Ok(encrypted.freeze())
+    }
+}
+
 impl FrameDecoder {
     pub fn new(frame_size: usize, key: &DecryptKey) -> Result<Self, FrameError> {
         if frame_size <= TAG_SIZE {
@@ -200,6 +241,21 @@ mod tests {
         let frame = encrypt(&key, 3, b"payload!");
 
         assert_eq!(decoder.decode_frame(frame, 3).unwrap(), &b"payload!"[..]);
+    }
+
+    #[test]
+    fn encrypts_for_the_existing_decoder() {
+        let key = DecryptKey::new([9; 32]);
+        let encoder = FrameEncoder::new(24, &key).unwrap();
+        let decoder = FrameDecoder::new(24, &key).unwrap();
+        let encrypted = encoder
+            .encode_frame(BytesMut::from(&b"payload!"[..]), 4)
+            .unwrap();
+
+        assert_eq!(
+            decoder.decode_frame(BytesMut::from(&encrypted[..]), 4).unwrap(),
+            &b"payload!"[..]
+        );
     }
 
     #[test]

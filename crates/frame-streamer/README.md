@@ -9,8 +9,8 @@ The crate currently provides:
 
 - a byte-granular `ByteStream` facade that maps logical byte ranges and rates
   to the frame-native scheduler, then clips the first and last plaintext frame;
-- an `EncryptedBytesBackend` boundary receiving physical byte ranges, plus a
-  `StreamBackend` adapter that assembles chunks and authenticates AES-256-GCM
+- an `EncryptedBytesDownloadBackend` boundary receiving physical byte ranges, plus a
+  `StreamDownloadBackend` adapter that assembles chunks and authenticates AES-256-GCM
   frames formatted as `tag || ciphertext`;
 - a frame-native `StreamRequest` containing a global `Range<u64>` and its
   allocated average frame rate;

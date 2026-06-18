@@ -6,13 +6,19 @@ mod memory;
 mod request;
 mod sizing;
 mod stream;
+mod upload;
 
 pub use byte::{ByteError, ByteRate, ByteRequest, ByteStream, ByteStreamConfig, ByteTransferModel};
-pub use frame::{FrameAssembler, FrameDecoder, FrameError, TAG_SIZE};
+pub use frame::{FrameAssembler, FrameDecoder, FrameEncoder, FrameError, TAG_SIZE};
 pub use memory::{FrameBudget, FrameBudgetError, FramePermit};
 pub use request::{DecryptKey, FrameRate, ObjectId, ObjectMeta, RequestError, StreamRequest};
 pub use sizing::{TransferModel, WindowSizing, WindowSizingError};
 pub use stream::{
-    BoxError, EncryptedByteStream, EncryptedBytesBackend, FrameBackend, FrameStream, ObjectPlan,
-    SignedUrl, StreamBackend, StreamConfig, StreamDriver, StreamSession, UrlTicket,
+    BoxError, DownloadBackend, EncryptedByteStream, EncryptedBytesDownloadBackend, FrameStream,
+    ObjectPlan, SignedUrl, StreamConfig, StreamDownloadBackend, StreamDriver, StreamSession,
+    UrlTicket,
+};
+pub use upload::{
+    ByteUpload, EncryptedBytesUploadBackend, StoredObject, StreamUploadBackend, UploadBackend,
+    UploadError, UploadObject, UploadResult,
 };

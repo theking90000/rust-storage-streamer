@@ -10,8 +10,8 @@ use bytes::Bytes;
 use futures_util::{Sink, Stream};
 
 use crate::{
-    BoxError, EncryptedBytesBackend, FrameBudget, FrameRate, ObjectMeta, StreamBackend,
-    StreamConfig, StreamRequest, StreamSession, TAG_SIZE, TransferModel,
+    BoxError, EncryptedBytesDownloadBackend, FrameBudget, FrameRate, ObjectMeta, StreamConfig,
+    StreamDownloadBackend, StreamRequest, StreamSession, TAG_SIZE, TransferModel,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
@@ -139,7 +139,7 @@ pub struct ByteStream {
 impl ByteStream {
     pub fn new(
         objects: impl Stream<Item = Result<ObjectMeta, BoxError>> + Send + 'static,
-        backend: Arc<dyn EncryptedBytesBackend>,
+        backend: Arc<dyn EncryptedBytesDownloadBackend>,
         request: ByteRequest,
         budget: FrameBudget,
         config: ByteStreamConfig,
@@ -148,7 +148,7 @@ impl ByteStream {
         let skip = (request.bytes.start % payload_size as u64) as usize;
         let length = request.bytes.end - request.bytes.start;
         let frame_request = request.frame_request(payload_size)?;
-        let backend = Arc::new(StreamBackend::new(backend, config.frame_size)?);
+        let backend = Arc::new(StreamDownloadBackend::new(backend, config.frame_size)?);
         let session = StreamSession::new(
             objects,
             backend,
@@ -272,9 +272,9 @@ mod tests {
         range: Mutex<Option<Range<u64>>>,
     }
 
-    impl EncryptedBytesBackend for Backend {
+    impl EncryptedBytesDownloadBackend for Backend {
         fn resolve_url(&self, _object: &ObjectMeta) -> UrlTicket {
-            Box::pin(async { Ok("url".into()) })
+            Box::pin(async { Ok(SignedUrl::new("url", None)) })
         }
 
         fn download(

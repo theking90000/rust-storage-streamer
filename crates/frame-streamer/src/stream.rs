@@ -6,6 +6,7 @@ use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::SystemTime;
 
 use async_stream::try_stream;
 use bytes::Bytes;
@@ -20,7 +21,28 @@ use crate::{
 use crate::{TransferModel, WindowSizing};
 
 pub type BoxError = Box<dyn Error + Send + Sync>;
-pub type SignedUrl = String;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignedUrl {
+    value: String,
+    expires_at: Option<SystemTime>,
+}
+
+impl SignedUrl {
+    pub fn new(value: impl Into<String>, expires_at: Option<SystemTime>) -> Self {
+        Self {
+            value: value.into(),
+            expires_at,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.value
+    }
+
+    pub const fn expires_at(&self) -> Option<SystemTime> {
+        self.expires_at
+    }
+}
 pub type UrlTicket = Pin<Box<dyn Future<Output = Result<SignedUrl, BoxError>> + Send>>;
 pub type FrameStream = Pin<Box<dyn Stream<Item = Result<Bytes, BoxError>> + Send>>;
 pub type EncryptedByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, BoxError>> + Send>>;
@@ -28,7 +50,7 @@ type ObjectStream = Pin<Box<dyn Stream<Item = Result<ObjectMeta, BoxError>> + Se
 type BudgetTicket = Pin<Box<dyn Future<Output = Result<FramePermit, FrameBudgetError>> + Send>>;
 
 /// The URL coordinator and HTTP/crypto pipeline seen by a stream session.
-pub trait FrameBackend: Send + Sync {
+pub trait DownloadBackend: Send + Sync {
     /// Creates an owned URL-resolution future. The session polls it while the
     /// object is inside its prefetch window.
     fn resolve_url(&self, object: &ObjectMeta) -> UrlTicket;
@@ -37,7 +59,7 @@ pub trait FrameBackend: Send + Sync {
     fn download(&self, object: &ObjectMeta, url: SignedUrl, frames: Range<u32>) -> FrameStream;
 }
 
-pub trait EncryptedBytesBackend: Send + Sync {
+pub trait EncryptedBytesDownloadBackend: Send + Sync {
     fn resolve_url(&self, object: &ObjectMeta) -> UrlTicket;
 
     fn download(
@@ -49,14 +71,14 @@ pub trait EncryptedBytesBackend: Send + Sync {
 }
 
 /// Turns encrypted HTTP chunks into authenticated plaintext frames.
-pub struct StreamBackend {
-    encrypted: Arc<dyn EncryptedBytesBackend>,
+pub struct StreamDownloadBackend {
+    encrypted: Arc<dyn EncryptedBytesDownloadBackend>,
     frame_size: usize,
 }
 
-impl StreamBackend {
+impl StreamDownloadBackend {
     pub fn new(
-        encrypted: Arc<dyn EncryptedBytesBackend>,
+        encrypted: Arc<dyn EncryptedBytesDownloadBackend>,
         frame_size: usize,
     ) -> Result<Self, BoxError> {
         if frame_size <= TAG_SIZE {
@@ -69,7 +91,7 @@ impl StreamBackend {
     }
 }
 
-impl FrameBackend for StreamBackend {
+impl DownloadBackend for StreamDownloadBackend {
     fn resolve_url(&self, object: &ObjectMeta) -> UrlTicket {
         self.encrypted.resolve_url(object)
     }
@@ -177,7 +199,7 @@ impl ObjectPlan {
 /// buffers frames per object, and only emits from the front object.
 pub struct StreamSession {
     objects: Fuse<ObjectStream>,
-    backend: Arc<dyn FrameBackend>,
+    backend: Arc<dyn DownloadBackend>,
     plans: VecDeque<ObjectPlan>,
     request: StreamRequest,
     budget: FrameBudget,
@@ -191,7 +213,7 @@ pub struct StreamSession {
 impl StreamSession {
     pub fn new(
         objects: impl Stream<Item = Result<ObjectMeta, BoxError>> + Send + 'static,
-        backend: Arc<dyn FrameBackend>,
+        backend: Arc<dyn DownloadBackend>,
         request: StreamRequest,
         budget: FrameBudget,
         config: StreamConfig,
@@ -590,13 +612,13 @@ mod tests {
         polled_urls: Arc<AtomicUsize>,
     }
 
-    impl FrameBackend for TestBackend {
+    impl DownloadBackend for TestBackend {
         fn resolve_url(&self, object: &ObjectMeta) -> UrlTicket {
             let url = object.uri.clone();
             let polled_urls = self.polled_urls.clone();
             Box::pin(async move {
                 polled_urls.fetch_add(1, Ordering::Relaxed);
-                Ok(url)
+                Ok(SignedUrl::new(url, None))
             })
         }
 
@@ -640,9 +662,9 @@ mod tests {
         requested: Mutex<Option<Range<u64>>>,
     }
 
-    impl EncryptedBytesBackend for RawBackend {
+    impl EncryptedBytesDownloadBackend for RawBackend {
         fn resolve_url(&self, _object: &ObjectMeta) -> UrlTicket {
-            Box::pin(async { Ok("url".into()) })
+            Box::pin(async { Ok(SignedUrl::new("url", None)) })
         }
 
         fn download(
@@ -769,9 +791,14 @@ mod tests {
             body: Bytes::from(body),
             requested: Mutex::new(None),
         });
-        let backend = StreamBackend::new(raw.clone(), 24).unwrap();
+        let backend = StreamDownloadBackend::new(raw.clone(), 24).unwrap();
 
-        let frames = FrameBackend::download(&backend, &object, "url".into(), 1..2)
+        let frames = DownloadBackend::download(
+            &backend,
+            &object,
+            SignedUrl::new("url", None),
+            1..2,
+        )
             .try_collect::<Vec<_>>()
             .await
             .unwrap();
@@ -791,9 +818,14 @@ mod tests {
             body: Bytes::from(body),
             requested: Mutex::new(None),
         });
-        let backend = StreamBackend::new(raw, 24).unwrap();
+        let backend = StreamDownloadBackend::new(raw, 24).unwrap();
 
-        let error = FrameBackend::download(&backend, &object, "url".into(), 1..2)
+        let error = DownloadBackend::download(
+            &backend,
+            &object,
+            SignedUrl::new("url", None),
+            1..2,
+        )
             .try_collect::<Vec<_>>()
             .await
             .unwrap_err();
