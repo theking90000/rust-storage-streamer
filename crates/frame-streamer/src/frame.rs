@@ -253,7 +253,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            decoder.decode_frame(BytesMut::from(&encrypted[..]), 4).unwrap(),
+            decoder
+                .decode_frame(BytesMut::from(&encrypted[..]), 4)
+                .unwrap(),
             &b"payload!"[..]
         );
     }

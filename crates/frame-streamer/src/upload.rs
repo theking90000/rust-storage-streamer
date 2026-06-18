@@ -92,6 +92,12 @@ impl UploadBackend for StreamUploadBackend {
         mut frames: UploadByteStream,
     ) -> UploadFuture {
         let frame_size = self.frame_size;
+        let max_frames = self.max_frames_per_segment();
+        if frame_count_hint.is_some_and(|count| count > max_frames) {
+            return Box::pin(async move {
+                Err(Box::new(UploadError::TooManyFrames { max_frames }) as BoxError)
+            });
+        }
         let encrypted = self.encrypted.clone();
         let id = object.id;
         let physical_size_hint = frame_count_hint.map(|count| u64::from(count) * frame_size as u64);
@@ -99,6 +105,9 @@ impl UploadBackend for StreamUploadBackend {
             let encoder = FrameEncoder::new(frame_size, &object.key)?;
             let mut index = 0;
             while let Some(frame) = frames.next().await {
+                if index >= u64::from(max_frames) {
+                    Err(UploadError::TooManyFrames { max_frames })?;
+                }
                 yield encoder.encode_frame(BytesMut::from(&frame?[..]), index)?;
                 index += 1;
             }
@@ -216,6 +225,7 @@ pub enum UploadError {
     ZeroCapacity,
     Empty,
     TooLarge { max_bytes: u64 },
+    TooManyFrames { max_frames: u32 },
     LengthMismatch { expected: u64, actual: u64 },
     Incomplete,
 }
@@ -226,8 +236,16 @@ impl fmt::Display for UploadError {
             Self::FrameTooSmall => f.write_str("frame size must be greater than the tag"),
             Self::ZeroCapacity => f.write_str("upload backend accepts no frames"),
             Self::Empty => f.write_str("segment body must not be empty"),
-            Self::TooLarge { max_bytes } => write!(f, "segment exceeds {max_bytes} plaintext bytes"),
-            Self::LengthMismatch { expected, actual } => write!(f, "Content-Length was {expected}, body contained {actual} bytes"),
+            Self::TooLarge { max_bytes } => {
+                write!(f, "segment exceeds {max_bytes} plaintext bytes")
+            }
+            Self::TooManyFrames { max_frames } => {
+                write!(f, "segment exceeds {max_frames} frames")
+            }
+            Self::LengthMismatch { expected, actual } => write!(
+                f,
+                "Content-Length was {expected}, body contained {actual} bytes"
+            ),
             Self::Incomplete => f.write_str("upload backend stopped before consuming the body"),
         }
     }
@@ -251,24 +269,42 @@ mod tests {
     }
 
     impl EncryptedBytesUploadBackend for MemoryBackend {
-        fn max_physical_bytes_per_segment(&self) -> u64 { 72 }
+        fn max_physical_bytes_per_segment(&self) -> u64 {
+            72
+        }
 
-        fn upload(&self, _id: ObjectId, _hint: Option<u64>, mut bytes: UploadByteStream) -> UploadFuture {
+        fn upload(
+            &self,
+            _id: ObjectId,
+            _hint: Option<u64>,
+            mut bytes: UploadByteStream,
+        ) -> UploadFuture {
             let output = self.bytes.clone();
             Box::pin(async move {
-                while let Some(chunk) = bytes.next().await { output.lock().unwrap().push(chunk?); }
-                Ok(StoredObject { uri: "memory://segment".into(), cached_url: None })
+                while let Some(chunk) = bytes.next().await {
+                    output.lock().unwrap().push(chunk?);
+                }
+                Ok(StoredObject {
+                    uri: "memory://segment".into(),
+                    cached_url: None,
+                })
             })
         }
 
         fn delete(&self, object: StoredObject) -> DeleteFuture {
             let deleted = self.deleted.clone();
-            Box::pin(async move { deleted.lock().unwrap().push(object.uri); Ok(()) })
+            Box::pin(async move {
+                deleted.lock().unwrap().push(object.uri);
+                Ok(())
+            })
         }
     }
 
     fn object() -> UploadObject {
-        UploadObject { id: ObjectId::new("segment"), key: DecryptKey::new([7; 32]) }
+        UploadObject {
+            id: ObjectId::new("segment"),
+            key: DecryptKey::new([7; 32]),
+        }
     }
 
     #[tokio::test]
@@ -276,19 +312,35 @@ mod tests {
         let raw = Arc::new(MemoryBackend::default());
         let backend = Arc::new(StreamUploadBackend::new(raw.clone(), 24).unwrap());
         let upload = ByteUpload::new(backend, 24).unwrap();
-        let result = upload.upload(
-            object(),
-            stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(b"abc")), Ok(Bytes::from_static(b"defghijk"))]),
-            Some(11),
-        ).await.unwrap();
+        let result = upload
+            .upload(
+                object(),
+                stream::iter([
+                    Ok::<_, std::io::Error>(Bytes::from_static(b"abc")),
+                    Ok(Bytes::from_static(b"defghijk")),
+                ]),
+                Some(11),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(result.plaintext_size, 11);
         assert_eq!(result.frame_count, 2);
         assert_eq!(result.checksum, *blake3::hash(b"abcdefghijk").as_bytes());
         let decoder = FrameDecoder::new(24, &DecryptKey::new([7; 32])).unwrap();
         let encrypted = raw.bytes.lock().unwrap();
-        assert_eq!(decoder.decode_frame(BytesMut::from(&encrypted[0][..]), 0).unwrap(), &b"abcdefgh"[..]);
-        assert_eq!(&decoder.decode_frame(BytesMut::from(&encrypted[1][..]), 1).unwrap()[..3], b"ijk");
+        assert_eq!(
+            decoder
+                .decode_frame(BytesMut::from(&encrypted[0][..]), 0)
+                .unwrap(),
+            &b"abcdefgh"[..]
+        );
+        assert_eq!(
+            &decoder
+                .decode_frame(BytesMut::from(&encrypted[1][..]), 1)
+                .unwrap()[..3],
+            b"ijk"
+        );
     }
 
     #[tokio::test]
@@ -296,7 +348,14 @@ mod tests {
         let raw = Arc::new(MemoryBackend::default());
         let backend = Arc::new(StreamUploadBackend::new(raw, 24).unwrap());
         let upload = ByteUpload::new(backend, 24).unwrap();
-        let error = upload.upload(object(), stream::iter([Ok::<_, std::io::Error>(Bytes::from(vec![0; 25]))]), None).await.unwrap_err();
+        let error = upload
+            .upload(
+                object(),
+                stream::iter([Ok::<_, std::io::Error>(Bytes::from(vec![0; 25]))]),
+                None,
+            )
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("exceeds 24"));
     }
 
@@ -305,9 +364,19 @@ mod tests {
         let raw = Arc::new(MemoryBackend::default());
         let backend = Arc::new(StreamUploadBackend::new(raw.clone(), 24).unwrap());
         let upload = ByteUpload::new(backend, 24).unwrap();
-        let error = upload.upload(object(), stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(b"abc"))]), Some(4)).await.unwrap_err();
+        let error = upload
+            .upload(
+                object(),
+                stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(b"abc"))]),
+                Some(4),
+            )
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("Content-Length"));
-        assert_eq!(raw.deleted.lock().unwrap().as_slice(), &["memory://segment"]);
+        assert_eq!(
+            raw.deleted.lock().unwrap().as_slice(),
+            &["memory://segment"]
+        );
     }
 
     #[allow(dead_code)]

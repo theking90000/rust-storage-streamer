@@ -11,7 +11,6 @@ use std::time::SystemTime;
 use async_stream::try_stream;
 use bytes::Bytes;
 use futures_util::stream::{Fuse, FusedStream};
-use futures_util::task::noop_waker_ref;
 use futures_util::{Sink, Stream, StreamExt};
 
 use crate::{
@@ -402,24 +401,11 @@ impl StreamSession {
     }
 
     fn poll_urls(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), BoxError>> {
-        let mut speculative_cx = Context::from_waker(noop_waker_ref());
-        let mut limiting_ticket_seen = false;
-
         for plan in &mut self.plans {
             let Some(ticket) = &mut plan.ticket else {
                 continue;
             };
-
-            let is_limiting =
-                !limiting_ticket_seen && plan.authorized > plan.emitted && plan.download.is_none();
-            limiting_ticket_seen |= is_limiting;
-            let ticket_cx = if is_limiting {
-                &mut *cx
-            } else {
-                &mut speculative_cx
-            };
-
-            match ticket.as_mut().poll(ticket_cx) {
+            match ticket.as_mut().poll(cx) {
                 Poll::Ready(Ok(url)) => {
                     plan.url = Some(url);
                     plan.ticket = None;
@@ -793,15 +779,11 @@ mod tests {
         });
         let backend = StreamDownloadBackend::new(raw.clone(), 24).unwrap();
 
-        let frames = DownloadBackend::download(
-            &backend,
-            &object,
-            SignedUrl::new("url", None),
-            1..2,
-        )
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
+        let frames =
+            DownloadBackend::download(&backend, &object, SignedUrl::new("url", None), 1..2)
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
 
         assert_eq!(*raw.requested.lock().unwrap(), Some(24..48));
         assert_eq!(frames, [Bytes::from_static(b"frame-1!")]);
@@ -820,12 +802,7 @@ mod tests {
         });
         let backend = StreamDownloadBackend::new(raw, 24).unwrap();
 
-        let error = DownloadBackend::download(
-            &backend,
-            &object,
-            SignedUrl::new("url", None),
-            1..2,
-        )
+        let error = DownloadBackend::download(&backend, &object, SignedUrl::new("url", None), 1..2)
             .try_collect::<Vec<_>>()
             .await
             .unwrap_err();
