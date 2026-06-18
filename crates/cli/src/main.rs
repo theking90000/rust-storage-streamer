@@ -6,15 +6,50 @@
 //! intentionally simple: a real adapter would also decrypt each frame.
 
 use std::ops::Range;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_stream::try_stream;
+use bytes::Bytes;
 use frame_streamer::{
     BoxError, FrameAssembler, FrameBudget, FrameRate, FrameStream, ObjectId, ObjectMeta, SignedUrl,
     StreamBackend, StreamConfig, StreamRequest, StreamSession, TransferModel, UrlTicket,
 };
-use futures_util::{StreamExt, sink, stream};
+use futures_util::{Sink, StreamExt, stream};
+
+/// Simulates a transport whose userspace buffer accepts one frame and then
+/// remains blocked forever. The driver must keep filling its bounded window.
+struct OneFrameOutput {
+    buffered: Option<Bytes>,
+}
+
+impl Sink<Bytes> for OneFrameOutput {
+    type Error = std::io::Error;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if self.buffered.is_none() {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, frame: Bytes) -> Result<(), Self::Error> {
+        println!("output accepted one frame, then blocked");
+        self.buffered = Some(frame);
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Pending
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Pending
+    }
+}
 
 /// Backend that resolves URLs trivially and downloads bodies over HTTP.
 struct HttpBackend {
@@ -116,13 +151,12 @@ async fn main() -> Result<(), BoxError> {
     println!("window: {:?}", x);
 
     let session = StreamSession::new(objects, backend, request, budget, config)?;
-    let output = sink::unfold(0u64, |index, frame: bytes::Bytes| async move {
-        println!("frame {index:>3}: {} bytes", frame.len());
-        Ok::<_, std::io::Error>(index + 1)
-    });
+    let output = OneFrameOutput { buffered: None };
 
-    session.pipe_into(output).await?;
-    println!("done");
+    match tokio::time::timeout(Duration::from_secs(10), session.pipe_into(output)).await {
+        Ok(result) => result?,
+        Err(_) => println!("demo complete: output stayed blocked while the frame window filled"),
+    }
     Ok(())
 }
 
