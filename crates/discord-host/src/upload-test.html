@@ -1,0 +1,91 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>File Upload Test</title>
+<input type="file" id="file" />
+<div id="status"></div>
+<progress id="progress" value="0" max="100" style="width: 400px"></progress>
+<div id="result"></div>
+
+<script>
+  const SEGMENT_SIZE = ((1 << 16) - 16) * 150; //150* 64KB, matches server default frame_size
+  const BASE = "";
+
+  file.onchange = async () => {
+    const f = file.files[0];
+    if (!f) return;
+
+    status.textContent = "Creating file...";
+    progress.value = 0;
+    result.innerHTML = "";
+
+    try {
+      const create = await fetch(BASE + "/files", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_size: f.size,
+          content_type: f.type || "application/octet-stream",
+          name: f.name,
+        }),
+      });
+      if (!create.ok)
+        throw new Error("Create failed: " + (await create.text()));
+      const { id } = await create.json();
+
+      const N = 4;
+      const segments = Math.ceil(f.size / SEGMENT_SIZE);
+      let done = 0;
+
+      const MAX_RETRIES = 3;
+
+      async function uploadSegment(i) {
+        const start = i * SEGMENT_SIZE;
+        const end = Math.min(start + SEGMENT_SIZE, f.size);
+        const blob = f.slice(start, end);
+        for (let attempt = 0; ; attempt++) {
+          try {
+            const upload = await fetch(`${BASE}/files/${id}/segments/${i}`, {
+              method: "PUT",
+              body: blob,
+            });
+            if (!upload.ok) {
+              throw new Error(await upload.text());
+            }
+            break;
+          } catch (e) {
+            if (attempt >= MAX_RETRIES)
+              throw new Error(`Segment ${i} failed after ${MAX_RETRIES + 1} attempts: ${e.message}`);
+            await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
+          }
+        }
+        done++;
+        status.textContent = `Uploading segment ${done}/${segments}...`;
+        progress.value = (done / (segments + 1)) * 100;
+      }
+
+      const queue = Array.from({ length: segments }, (_, i) => i);
+      await Promise.all(
+        Array.from({ length: Math.min(N, segments) }, async () => {
+          while (queue.length) {
+            await uploadSegment(queue.shift());
+          }
+        }),
+      );
+
+      status.textContent = "Finalizing...";
+      const complete = await fetch(`${BASE}/files/${id}/complete`, {
+        method: "POST",
+      });
+      if (!complete.ok)
+        throw new Error("Complete failed: " + (await complete.text()));
+
+      progress.value = 100;
+      const dl = `${BASE}/files/${id}`;
+      status.textContent = "Done!";
+      result.innerHTML = `File ID: ${id}<br><a href="${dl}">Download</a>`;
+    } catch (e) {
+      status.textContent = "Error: " + e.message;
+      progress.value = 0;
+    }
+  };
+</script>

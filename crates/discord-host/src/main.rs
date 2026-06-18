@@ -5,6 +5,8 @@ mod config;
 
 use std::time::Duration;
 
+use axum::response::Html;
+use axum::routing::get;
 use file_router::{AppState, Catalog, ServerConfig, router};
 use frame_streamer::{
     BoxError, ByteRate, ByteStreamConfig, ByteTransferModel, FrameBudget,
@@ -58,7 +60,10 @@ async fn main() -> Result<(), BoxError> {
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
-    axum::serve(listener, router(state).layer(cors))
+    let app = router(state)
+        .route("/", get(|| async { Html(include_str!("upload-test.html")) }))
+        .layer(cors);
+    axum::serve(listener, app)
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c().await.ok();
         })

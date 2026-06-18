@@ -10,7 +10,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
-use axum::{Json, Router};
+use axum::{Json, Router, middleware};
 use frame_streamer::{
     ByteRate, ByteRequest, ByteStream, ByteStreamConfig, ByteUpload, DecryptKey,
     EncryptedBytesDownloadBackend, FrameBudget, ObjectId, UploadBackend, UploadError, UploadObject,
@@ -82,6 +82,13 @@ pub fn router(state: AppState) -> Router {
         .route("/files/{id}", get(download_file).head(head_file))
         .route("/files/{id}/segments/{index}", put(upload_segment))
         .route("/files/{id}/complete", post(complete_file))
+        .layer(middleware::map_response(|mut response: Response| async {
+            const SERVER: &str = concat!("rust-storage-streamer/", env!("CARGO_PKG_VERSION"));
+            response
+                .headers_mut()
+                .insert(header::SERVER, HeaderValue::from_static(SERVER));
+            response
+        }))
         .with_state(state)
 }
 
