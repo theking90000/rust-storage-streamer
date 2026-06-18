@@ -1,0 +1,12 @@
+[package]
+name = "s-streamer"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "s_streamer"
+path = "src/lib.rs"
+
+[dependencies]
+
