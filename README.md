@@ -60,6 +60,44 @@ A small Cargo workspace, each crate with one job:
 | [`streamer-s3-discord`](crates/streamer-s3-discord/README.md) | Flavored server assembling `s3-gateway` with `discord-store`. |
 | [`files-cli`](crates/files-cli/README.md) | `streamer-files-cli` uploads files or piped streams to the files gateway. |
 
+## Install prebuilt binaries
+
+Release archives are available for macOS ARM64, Linux ARM64, and Linux
+x86-64-v3. The following snippet detects the platform, downloads the latest
+matching archive, and installs all three executables in `/usr/local/bin`:
+
+```sh
+case "$(uname -s):$(uname -m)" in
+  Darwin:arm64)  target=aarch64-apple-darwin ;;
+  Linux:aarch64) target=aarch64-unknown-linux-gnu ;;
+  Linux:x86_64)  target=x86_64-unknown-linux-gnu-v3 ;;
+  *) echo "Unsupported platform: $(uname -s) $(uname -m)" >&2; exit 1 ;;
+esac
+
+version=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+  https://github.com/theking90000/rust-storage-streamer/releases/latest)
+version=${version##*/}
+package="rust-storage-streamer-${version}-${target}"
+
+curl -fLo "${package}.tar.gz" \
+  "https://github.com/theking90000/rust-storage-streamer/releases/latest/download/${package}.tar.gz"
+tar -xzf "${package}.tar.gz"
+sudo install -m755 \
+  "${package}/streamer-files-discord" \
+  "${package}/streamer-s3-discord" \
+  "${package}/streamer-files-cli" \
+  /usr/local/bin/
+```
+
+The installed executables are:
+
+- `streamer-files-discord`: native HTTP files gateway backed by Discord.
+- `streamer-s3-discord`: S3-compatible gateway backed by Discord.
+- `streamer-files-cli`: command-line uploader for the HTTP files gateway.
+
+The Linux x86_64 build targets the x86-64-v3 instruction set and requires a
+compatible CPU (AVX2, BMI2, and FMA support).
+
 ## Quick start
 
 ```sh

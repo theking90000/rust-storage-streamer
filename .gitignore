@@ -5,3 +5,4 @@
 catalog.db*
 hooks.txt
 s3-catalog.db*
+dist/
