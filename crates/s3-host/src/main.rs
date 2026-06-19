@@ -32,6 +32,8 @@ enum Command {
         bind: String,
         #[arg(long, env = "DH_WEBHOOKS_FILE")]
         webhooks_file: PathBuf,
+        #[arg(long, env = "DH_PROXY_URL")]
+        proxy_url: Option<String>,
         #[arg(long, env = "S3_FRAME_SIZE", default_value_t = 1 << 16)]
         frame_size: usize,
         #[arg(long, env = "S3_MAX_OBJECT_SIZE", default_value_t = 20 * 1024 * 1024 * 1024_u64)]
@@ -79,6 +81,7 @@ async fn main() -> Result<(), BoxError> {
         Command::Serve {
             bind,
             webhooks_file,
+            proxy_url,
             frame_size,
             max_object_size,
             target_rate,
@@ -91,6 +94,7 @@ async fn main() -> Result<(), BoxError> {
                 catalog,
                 bind,
                 webhooks_file,
+                proxy_url,
                 frame_size,
                 max_object_size,
                 target_rate,
@@ -135,6 +139,7 @@ async fn serve(
     catalog: Catalog,
     bind: String,
     webhooks_file: PathBuf,
+    proxy_url: Option<String>,
     frame_size: usize,
     max_object_size: u64,
     target_rate: f64,
@@ -147,7 +152,8 @@ async fn serve(
     if webhooks.is_empty() {
         return Err(format!("{} contained no webhooks", webhooks_file.display()).into());
     }
-    let backends = discord::create_discord_backend(webhooks, frame_size)?;
+    let backends =
+        discord::create_discord_backend_with_proxy(webhooks, frame_size, proxy_url.as_deref())?;
     let rate = ByteRate::new(target_rate)?;
     let stream_config = ByteStreamConfig::new(
         frame_size,

@@ -42,10 +42,20 @@ pub fn create_discord_backend(
     webhooks: Vec<Webhook>,
     frame_size: usize,
 ) -> Result<DiscordBackends, BoxError> {
+    create_discord_backend_with_proxy(webhooks, frame_size, None)
+}
+
+/// Builds Discord backends whose API and CDN clients use the same optional
+/// HTTP(S) or SOCKS5 proxy.
+pub fn create_discord_backend_with_proxy(
+    webhooks: Vec<Webhook>,
+    frame_size: usize,
+    proxy_url: Option<&str>,
+) -> Result<DiscordBackends, BoxError> {
     if webhooks.is_empty() {
         return Err(BoxError::from("webhook list must not be empty"));
     }
-    let core = Arc::new(DiscordCore::new(webhooks)?);
+    let core = Arc::new(DiscordCore::with_proxy(webhooks, proxy_url)?);
     let encrypted_upload = Arc::new(DiscordEncryptedUpload::new(core.clone(), frame_size));
     let upload_backend =
         Arc::new(StreamUploadBackend::new(encrypted_upload, frame_size)?) as Arc<dyn UploadBackend>;

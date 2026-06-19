@@ -27,7 +27,11 @@ async fn main() -> Result<(), BoxError> {
             cfg.webhooks_file.display()
         )));
     }
-    let backends = discord::create_discord_backend(webhooks, cfg.frame_size)?;
+    let backends = discord::create_discord_backend_with_proxy(
+        webhooks,
+        cfg.frame_size,
+        cfg.proxy_url.as_deref(),
+    )?;
 
     let catalog = Catalog::connect(&cfg.database_url).await?;
     let rate = ByteRate::new(cfg.target_rate)?;

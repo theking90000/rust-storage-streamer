@@ -43,13 +43,27 @@ pub(crate) struct DiscordCore {
 }
 
 impl DiscordCore {
+    #[cfg(test)]
     pub fn new(webhooks: Vec<Webhook>) -> Result<Self, BoxError> {
-        Self::with_base(webhooks, DEFAULT_API_BASE.to_owned())
+        Self::with_proxy(webhooks, None)
     }
 
+    #[cfg(test)]
     pub fn with_base(webhooks: Vec<Webhook>, api_base: String) -> Result<Self, BoxError> {
-        let api_client = pool().build().map_err(boxed)?;
-        let cdn_client = pool().build().map_err(boxed)?;
+        Self::with_base_and_proxy(webhooks, api_base, None)
+    }
+
+    pub fn with_proxy(webhooks: Vec<Webhook>, proxy_url: Option<&str>) -> Result<Self, BoxError> {
+        Self::with_base_and_proxy(webhooks, DEFAULT_API_BASE.to_owned(), proxy_url)
+    }
+
+    fn with_base_and_proxy(
+        webhooks: Vec<Webhook>,
+        api_base: String,
+        proxy_url: Option<&str>,
+    ) -> Result<Self, BoxError> {
+        let api_client = client(proxy_url)?;
+        let cdn_client = client(None)?;
         Ok(Self {
             api_client,
             cdn_client,
@@ -206,6 +220,23 @@ fn pool() -> reqwest::ClientBuilder {
         .tcp_nodelay(true)
 }
 
+fn client(proxy_url: Option<&str>) -> Result<reqwest::Client, BoxError> {
+    let mut builder = pool();
+    if let Some(url) = proxy_url {
+        let scheme = url
+            .split_once("://")
+            .map(|(scheme, _)| scheme)
+            .unwrap_or_default();
+        if !matches!(scheme, "http" | "https" | "socks5" | "socks5h") {
+            return Err(BoxError::from(format!(
+                "unsupported proxy scheme '{scheme}'; expected http, https, socks5, or socks5h"
+            )));
+        }
+        builder = builder.proxy(reqwest::Proxy::all(url).map_err(boxed)?);
+    }
+    builder.build().map_err(boxed)
+}
+
 fn first_attachment(attachments: Vec<Attachment>) -> Result<String, BoxError> {
     attachments
         .into_iter()
@@ -236,4 +267,44 @@ fn parse_expiry(url: &str) -> Option<SystemTime> {
 
 fn boxed(error: reqwest::Error) -> BoxError {
     Box::new(error)
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+
+    fn webhook() -> Vec<Webhook> {
+        vec![Webhook {
+            id: "1".to_owned(),
+            token: "token".to_owned(),
+        }]
+    }
+
+    #[test]
+    fn accepts_supported_proxy_schemes_and_no_proxy() {
+        for proxy in [
+            None,
+            Some("http://127.0.0.1:8080"),
+            Some("https://127.0.0.1:8443"),
+            Some("socks5://127.0.0.1:1080"),
+            Some("socks5h://127.0.0.1:1080"),
+        ] {
+            DiscordCore::with_base_and_proxy(webhook(), "http://localhost".to_owned(), proxy)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_or_invalid_proxy_urls() {
+        for proxy in ["socks4://127.0.0.1:1080", "ftp://127.0.0.1", "http://"] {
+            assert!(
+                DiscordCore::with_base_and_proxy(
+                    webhook(),
+                    "http://localhost".to_owned(),
+                    Some(proxy),
+                )
+                .is_err()
+            );
+        }
+    }
 }

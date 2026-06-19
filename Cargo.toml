@@ -14,7 +14,7 @@ blake3 = "1"
 aes-gcm = "0.10"
 async-stream = "0.3"
 dashmap = "6"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "multipart", "socks"] }
 futures-util = { version = "0.3", features = ["sink"] }
 tokio = { version = "1", features = ["macros", "rt", "sync", "test-util", "time"] }
 axum = "0.8"

@@ -53,7 +53,12 @@ A small Cargo workspace, each crate with one job:
 echo '123456789:your-webhook-token' > webhooks.txt
 
 # 2. Run the server (defaults to 127.0.0.1:8080)
-DH_WEBHOOKS_FILE=webhooks.txt cargo run -p discord-host
+cargo run -p discord-host -- --webhooks-file webhooks.txt
+
+# Optional WireProxy / HTTP(S) endpoint used by Discord API client
+cargo run -p discord-host -- \
+  --webhooks-file webhooks.txt \
+  --proxy-url socks5h://127.0.0.1:25344
 
 # 3. Open http://localhost:8080 and drop a file in
 ```
@@ -100,7 +105,7 @@ access, endpoint `http://localhost:8080`, and region `us-east-1`:
 
 ```sh
 cargo run -p s3-host -- credential create --can-create-buckets
-DH_WEBHOOKS_FILE=webhooks.txt cargo run -p s3-host -- serve
+cargo run -p s3-host -- serve --webhooks-file webhooks.txt
 ```
 
 See the [`s3-host` README](crates/s3-host/README.md) for the rclone config and

@@ -15,6 +15,7 @@ pub struct Config {
     pub bind: String,
     pub database_url: String,
     pub webhooks_file: PathBuf,
+    pub proxy_url: Option<String>,
     pub frame_size: usize,
     pub max_file_size: u64,
     pub target_rate: f64,
@@ -31,6 +32,7 @@ struct Partial {
     bind: Option<String>,
     database_url: Option<String>,
     webhooks_file: Option<PathBuf>,
+    proxy_url: Option<String>,
     frame_size: Option<usize>,
     max_file_size: Option<u64>,
     target_rate: Option<f64>,
@@ -56,6 +58,8 @@ struct Cli {
     #[arg(long)]
     webhooks_file: Option<PathBuf>,
     #[arg(long)]
+    proxy_url: Option<String>,
+    #[arg(long)]
     frame_size: Option<usize>,
     #[arg(long)]
     max_file_size: Option<u64>,
@@ -77,6 +81,7 @@ impl Cli {
             bind: self.bind,
             database_url: self.database_url,
             webhooks_file: self.webhooks_file,
+            proxy_url: self.proxy_url,
             frame_size: self.frame_size,
             max_file_size: self.max_file_size,
             target_rate: self.target_rate,
@@ -96,6 +101,7 @@ impl Partial {
             bind: env_str("DH_BIND"),
             database_url: env_str("DH_DATABASE_URL"),
             webhooks_file: env_str("DH_WEBHOOKS_FILE").map(PathBuf::from),
+            proxy_url: env_str("DH_PROXY_URL"),
             frame_size: env_parse("DH_FRAME_SIZE"),
             max_file_size: env_parse("DH_MAX_FILE_SIZE"),
             target_rate: env_parse("DH_TARGET_RATE"),
@@ -118,6 +124,7 @@ impl Partial {
             bind: self.bind.or(other.bind),
             database_url: self.database_url.or(other.database_url),
             webhooks_file: self.webhooks_file.or(other.webhooks_file),
+            proxy_url: self.proxy_url.or(other.proxy_url),
             frame_size: self.frame_size.or(other.frame_size),
             max_file_size: self.max_file_size.or(other.max_file_size),
             target_rate: self.target_rate.or(other.target_rate),
@@ -136,6 +143,7 @@ impl Partial {
             bind: Some("0.0.0.0:8080".to_owned()),
             database_url: Some("sqlite:catalog.db?mode=rwc".to_owned()),
             webhooks_file: None,
+            proxy_url: None,
             frame_size: Some(1 << 16),
             max_file_size: Some(20 * 1024 * 1024 * 1024),
             target_rate: Some(60_000_000.0),
@@ -167,6 +175,7 @@ pub fn resolve() -> Result<Config, BoxError> {
                 "webhooks_file is required (DH_WEBHOOKS_FILE, --webhooks-file, or webhooks_file in TOML)",
             )
         })?,
+        proxy_url: merged.proxy_url,
         bind: merged.bind.unwrap(),
         database_url: merged.database_url.unwrap(),
         frame_size: merged.frame_size.unwrap(),

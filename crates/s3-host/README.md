@@ -24,7 +24,12 @@ Use `--database-url` or `S3_DATABASE_URL` to select another catalog.
 ## Run
 
 ```sh
-DH_WEBHOOKS_FILE=webhooks.txt cargo run -p s3-host -- serve
+cargo run -p s3-host -- serve --webhooks-file webhooks.txt
+
+# Optional: route Discord API traffic through one proxy
+cargo run -p s3-host -- serve \
+  --webhooks-file webhooks.txt \
+  --proxy-url socks5h://127.0.0.1:25344
 ```
 
 The server defaults to `0.0.0.0:8080`, region `us-east-1`, and a 20 GiB object
