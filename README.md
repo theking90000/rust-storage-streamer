@@ -105,10 +105,10 @@ compatible CPU (AVX2, BMI2, and FMA support).
 echo '123456789:your-webhook-token' > webhooks.txt
 
 # 2. Run the server (defaults to 127.0.0.1:8080)
-cargo run -p streamer-files-discord -- --webhooks-file webhooks.txt
+streamer-files-discord --webhooks-file webhooks.txt
 
 # Optional WireProxy / HTTP(S) endpoint used by Discord API client
-cargo run -p streamer-files-discord -- \
+streamer-files-discord \
   --webhooks-file webhooks.txt \
   --proxy-url socks5h://127.0.0.1:25344
 
@@ -125,10 +125,10 @@ a pipe, with a live progress bar and parallel segments:
 
 ```sh
 # A file (progress bar: %, MB/s, ETA, blocks)
-cargo run -p files-cli -- ./video.mp4 --content-type video/mp4
+streamer-files-cli ./video.mp4 --content-type video/mp4
 
 # A pipe / stdin (spinner: MB/s, blocks sent), 8-way parallel
-cat ./video.mp4 | cargo run -p files-cli -- --name video.mp4 -p 8
+cat ./video.mp4 | streamer-files-cli --name video.mp4 -p 8
 ```
 
 It prints the download URL to stdout. The backend defaults to
@@ -164,8 +164,8 @@ It is intended for clients such as rclone; it is not an AWS service.
 Create a credential and start the gateway:
 
 ```sh
-cargo run -p streamer-s3-discord -- credential create --can-create-buckets
-cargo run -p streamer-s3-discord -- serve --webhooks-file webhooks.txt
+streamer-s3-discord credential create --can-create-buckets
+streamer-s3-discord serve --webhooks-file webhooks.txt
 ```
 
 Configure rclone with the access and secret keys printed by the first command:
