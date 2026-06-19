@@ -1,6 +1,14 @@
 [workspace]
 resolver = "3"
-members = ["crates/frame-streamer", "crates/cli", "crates/file-router", "crates/discord", "crates/discord-host", "crates/s3-router", "crates/s3-host"]
+members = [
+    "crates/frame-streamer",
+    "crates/files-cli",
+    "crates/files-gateway",
+    "crates/discord-store",
+    "crates/streamer-files-discord",
+    "crates/s3-gateway",
+    "crates/streamer-s3-discord",
+]
 
 [workspace.package]
 version = "0.1.0"

@@ -1,0 +1,17 @@
+[package]
+name = "streamer-s3-discord"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+s3-gateway = { path = "../s3-gateway" }
+discord-store = { path = "../discord-store" }
+frame-streamer.workspace = true
+tokio = { workspace = true, features = ["signal", "rt-multi-thread"] }
+axum.workspace = true
+clap.workspace = true
+s3s.workspace = true
+rand.workspace = true
+uuid.workspace = true
+hex.workspace = true

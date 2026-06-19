@@ -392,21 +392,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
-name = "cli"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "bytes",
- "clap",
- "frame-streamer",
- "futures-util",
- "indicatif",
- "reqwest",
- "serde",
- "tokio",
-]
-
-[[package]]
 name = "cmov"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -609,7 +594,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "discord"
+name = "discord-store"
 version = "0.1.0"
 dependencies = [
  "async-stream",
@@ -622,21 +607,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "discord-host"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "discord",
- "file-router",
- "frame-streamer",
- "serde",
- "tokio",
- "toml",
- "tower-http",
 ]
 
 [[package]]
@@ -710,7 +680,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "file-router"
+name = "files-cli"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "bytes",
+ "clap",
+ "frame-streamer",
+ "futures-util",
+ "indicatif",
+ "reqwest",
+ "serde",
+ "tokio",
+]
+
+[[package]]
+name = "files-gateway"
 version = "0.1.0"
 dependencies = [
  "axum",
@@ -1970,23 +1955,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
-name = "s3-host"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "discord",
- "frame-streamer",
- "hex",
- "rand 0.9.4",
- "s3-router",
- "s3s",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "s3-router"
+name = "s3-gateway"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2466,6 +2435,37 @@ checksum = "04082e93ed1a06debd9148c928234b46d2cf260bc65f44e1d1d3fa594c5beebc"
 dependencies = [
  "simdutf8",
  "thiserror",
+]
+
+[[package]]
+name = "streamer-files-discord"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "discord-store",
+ "files-gateway",
+ "frame-streamer",
+ "serde",
+ "tokio",
+ "toml",
+ "tower-http",
+]
+
+[[package]]
+name = "streamer-s3-discord"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "discord-store",
+ "frame-streamer",
+ "hex",
+ "rand 0.9.4",
+ "s3-gateway",
+ "s3s",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

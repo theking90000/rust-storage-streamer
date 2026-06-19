@@ -1,0 +1,20 @@
+[package]
+name = "files-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "streamer-files-cli"
+path = "src/main.rs"
+
+[dependencies]
+frame-streamer.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+async-stream.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "io-util", "io-std", "time", "sync"] }
+reqwest.workspace = true
+clap.workspace = true
+serde.workspace = true
+indicatif.workspace = true

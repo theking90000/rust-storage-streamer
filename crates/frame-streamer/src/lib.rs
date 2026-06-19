@@ -1,5 +1,7 @@
 //! Core primitives for bounded, framed HTTP streaming.
 
+use std::sync::Arc;
+
 mod byte;
 mod frame;
 mod memory;
@@ -22,3 +24,10 @@ pub use upload::{
     ByteUpload, DeleteFuture, EncryptedBytesUploadBackend, StoredObject, StreamUploadBackend,
     UploadBackend, UploadByteStream, UploadError, UploadFuture, UploadObject, UploadResult,
 };
+
+/// Upload and download facets exposed by a physical storage implementation.
+#[derive(Clone)]
+pub struct StorageBackend {
+    pub upload: Arc<dyn UploadBackend>,
+    pub download: Arc<dyn EncryptedBytesDownloadBackend>,
+}

@@ -1,0 +1,20 @@
+[package]
+name = "discord-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+frame-streamer.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+async-stream.workspace = true
+tokio = { workspace = true, features = ["rt", "fs"] }
+serde.workspace = true
+serde_json.workspace = true
+dashmap.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

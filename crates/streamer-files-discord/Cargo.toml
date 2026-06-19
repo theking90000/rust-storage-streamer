@@ -1,0 +1,20 @@
+[package]
+name = "streamer-files-discord"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "streamer-files-discord"
+path = "src/main.rs"
+
+[dependencies]
+files-gateway = { path = "../files-gateway" }
+discord-store = { path = "../discord-store" }
+frame-streamer.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "fs"] }
+tower-http.workspace = true
+axum.workspace = true
+serde.workspace = true
+toml.workspace = true
+clap.workspace = true

@@ -39,12 +39,12 @@ A small Cargo workspace, each crate with one job:
 | Crate                                               | Role                                                                                                                                                                                                            |
 | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`frame-streamer`](crates/frame-streamer/README.md) | The core. Async primitives that turn a lazy sequence of framed, encrypted objects into one ordered `ByteStream`, with a global `FrameBudget` and a transfer model. Transport and crypto adapters are pluggable. |
-| [`file-router`](crates/file-router/README.md)       | Axum router: SQLite catalog, segmented upload/download endpoints, AES-256-GCM, range requests. Backend-agnostic.                                                                                                |
-| [`discord`](crates/discord)                         | The storage backend — uploads/downloads through Discord webhooks, with rate-limit handling.                                                                                                                     |
-| [`discord-host`](crates/discord-host/README.md)     | The production server: wires `file-router` + `discord` together, adds CORS, and serves the web upload UI at `/`.                                                                                                |
-| [`cli`](crates/cli/README.md)                       | `frame-streamer-cli` — uploads a file or a piped stream to the HTTP backend in parallel, with a live progress bar / throughput readout.                                                                          |
-| [`s3-router`](crates/s3-router/README.md)           | Private S3-compatible catalog and router built on `s3s`, with SigV4, buckets, metadata, ranges, multipart uploads, and server-side copies.                                                                        |
-| [`s3-host`](crates/s3-host/README.md)               | Standalone rclone-compatible S3 server backed by Discord. It does not expose the public `file-router` API.                                                                                                       |
+| [`files-gateway`](crates/files-gateway/README.md) | Files HTTP gateway: SQLite catalog, segmented upload/download endpoints, AES-256-GCM, and range requests. Store-agnostic. |
+| [`s3-gateway`](crates/s3-gateway/README.md) | Private S3-compatible gateway built on `s3s`, with SigV4, buckets, metadata, ranges, multipart uploads, and server-side copies. |
+| [`discord-store`](crates/discord-store) | Physical store using Discord webhooks, with rate-limit handling. |
+| [`streamer-files-discord`](crates/streamer-files-discord/README.md) | Flavored server assembling `files-gateway` with `discord-store`. |
+| [`streamer-s3-discord`](crates/streamer-s3-discord/README.md) | Flavored server assembling `s3-gateway` with `discord-store`. |
+| [`files-cli`](crates/files-cli/README.md) | `streamer-files-cli` uploads files or piped streams to the files gateway. |
 
 ## Quick start
 
@@ -53,10 +53,10 @@ A small Cargo workspace, each crate with one job:
 echo '123456789:your-webhook-token' > webhooks.txt
 
 # 2. Run the server (defaults to 127.0.0.1:8080)
-cargo run -p discord-host -- --webhooks-file webhooks.txt
+cargo run -p streamer-files-discord -- --webhooks-file webhooks.txt
 
 # Optional WireProxy / HTTP(S) endpoint used by Discord API client
-cargo run -p discord-host -- \
+cargo run -p streamer-files-discord -- \
   --webhooks-file webhooks.txt \
   --proxy-url socks5h://127.0.0.1:25344
 
@@ -68,15 +68,15 @@ straight from the result.
 
 ### From the command line
 
-`frame-streamer-cli` does the same upload pipeline as the web UI, from a file or
+`streamer-files-cli` does the same upload pipeline as the web UI, from a file or
 a pipe, with a live progress bar and parallel segments:
 
 ```sh
 # A file (progress bar: %, MB/s, ETA, blocks)
-cargo run -p cli -- ./video.mp4 --content-type video/mp4
+cargo run -p files-cli -- ./video.mp4 --content-type video/mp4
 
 # A pipe / stdin (spinner: MB/s, blocks sent), 8-way parallel
-cat ./video.mp4 | cargo run -p cli -- --name video.mp4 -p 8
+cat ./video.mp4 | cargo run -p files-cli -- --name video.mp4 -p 8
 ```
 
 It prints the download URL to stdout. The backend defaults to
@@ -95,20 +95,20 @@ It prints the download URL to stdout. The backend defaults to
 
 Configuration (bind address, frame size, rate calibration, file-size limits)
 is layered **env > CLI > TOML** — see the
-[`discord-host` README](crates/discord-host/README.md).
+[`streamer-files-discord` README](crates/streamer-files-discord/README.md).
 
 ### S3 / rclone
 
-The separate `s3-host` binary exposes only an authenticated S3 API. Create a
+The separate `streamer-s3-discord` binary exposes only an authenticated S3 API. Create a
 credential, start it, then configure rclone with `provider = Other`, path-style
 access, endpoint `http://localhost:8080`, and region `us-east-1`:
 
 ```sh
-cargo run -p s3-host -- credential create --can-create-buckets
-cargo run -p s3-host -- serve --webhooks-file webhooks.txt
+cargo run -p streamer-s3-discord -- credential create --can-create-buckets
+cargo run -p streamer-s3-discord -- serve --webhooks-file webhooks.txt
 ```
 
-See the [`s3-host` README](crates/s3-host/README.md) for the rclone config and
+See the [`streamer-s3-discord` README](crates/streamer-s3-discord/README.md) for the rclone config and
 credential grant commands.
 
 ## Build with Nix
@@ -117,8 +117,10 @@ A flake is provided; the package builds the whole workspace with no system
 dependencies (vendored SQLite, rustls).
 
 ```sh
-nix build              # -> ./result/bin/discord-host
-nix run .#discord-storage-streamer
+nix build              # -> ./result/bin/streamer-files-discord
+nix run .#streamer-files-discord
+nix run .#streamer-s3-discord
+nix run .#streamer-files-cli
 nix develop            # dev shell with rust-analyzer, clippy, rustfmt
 ```
 
