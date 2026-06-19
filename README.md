@@ -23,9 +23,17 @@ Use it through whichever interface fits the job:
 
 **Upload** is segmented and parallel. The client (the bundled web UI, or any
 HTTP client) cuts the file into frame-aligned segments and `PUT`s them
-concurrently. Each segment is encrypted with its own random AES-256-GCM key,
-framed as `tag || ciphertext`, checksummed with BLAKE3, and pushed to a Discord
-webhook. A SQLite catalog records the file, its segments, and the message URLs.
+concurrently. AES-256-GCM is applied **per frame, not per segment**: each
+segment carries its own random key, but the file is sealed in fixed-size frames
+of 2^16 bytes — a 16-byte authentication tag plus 65,520 bytes of ciphertext,
+laid out as `tag || ciphertext` — with the frame's index as its nonce. The whole
+segment is then checksummed with BLAKE3 and pushed to a Discord webhook. A SQLite
+catalog records the file, its segments, and the message URLs.
+
+Because every frame is an independent, self-authenticating GCM unit, the store
+supports fast random-access seeking: a read maps directly to the frames that
+cover it and decrypts only those, instead of having to authenticate an entire
+segment to reach an offset inside it.
 
 **Download** is sequential streaming. The server resolves the stored objects,
 authenticates and decrypts frames on the fly, and pipes them to the client
