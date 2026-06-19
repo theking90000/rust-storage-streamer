@@ -10,10 +10,11 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+        version = cargoToml.workspace.package.version;
         mkPackage = { pname, description, cargoPackage ? pname }:
           pkgs.rustPlatform.buildRustPackage {
-            inherit pname;
-            version = "0.1.0";
+            inherit pname version;
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [ "-p" cargoPackage ];

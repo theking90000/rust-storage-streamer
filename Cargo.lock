@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "discord-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-stream",
  "axum",
@@ -681,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "files-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-stream",
  "bytes",
@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "files-gateway"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "bytes",
@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "frame-streamer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "async-stream",
@@ -1956,7 +1956,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s3-gateway"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2439,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "streamer-files-discord"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "clap",
@@ -2454,7 +2454,7 @@ dependencies = [
 
 [[package]]
 name = "streamer-s3-discord"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "clap",
