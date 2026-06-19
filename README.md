@@ -13,6 +13,12 @@ reassembles a lazy sequence of remote, encrypted frames into a single ordered
 byte stream without unbounded buffering, detached tasks, or head-of-line
 surprises. Discord is just the backend that made it fun.
 
+Use it through whichever interface fits the job:
+
+- **S3-compatible API** for rclone and other S3 clients.
+- **Native HTTP API** for direct uploads, downloads, ranges, and application integration.
+- **Network disk** by mounting the S3-compatible endpoint with `rclone mount`.
+
 ## How it works
 
 **Upload** is segmented and parallel. The client (the bundled web UI, or any
@@ -81,9 +87,14 @@ cat ./video.mp4 | cargo run -p files-cli -- --name video.mp4 -p 8
 
 It prints the download URL to stdout. The backend defaults to
 `https://wd40.theking90000.be` and can be overridden with `-b/--backend` or the
-`WD40_BACKEND` env var — see the [`cli` README](crates/cli/README.md).
+`WD40_BACKEND` env var — see the [`files-cli` README](crates/files-cli/README.md).
 
 ### HTTP API
+
+`streamer-files-discord` exposes the project-native HTTP interface. It is the
+smallest option for a web UI, custom application, or direct streaming client:
+uploads are split into independently encrypted segments, while downloads are a
+normal HTTP resource with `HEAD` and byte-range support.
 
 | Method         | Path                           |                                                         |
 | -------------- | ------------------------------ | ------------------------------------------------------- |
@@ -97,24 +108,61 @@ Configuration (bind address, frame size, rate calibration, file-size limits)
 is layered **env > CLI > TOML** — see the
 [`streamer-files-discord` README](crates/streamer-files-discord/README.md).
 
-### S3 / rclone
+### S3-compatible API
 
-The separate `streamer-s3-discord` binary exposes only an authenticated S3 API. Create a
-credential, start it, then configure rclone with `provider = Other`, path-style
-access, endpoint `http://localhost:8080`, and region `us-east-1`:
+The separate `streamer-s3-discord` binary exposes an authenticated,
+S3-compatible API backed by Discord webhooks. It supports SigV4 authentication,
+private buckets, metadata, ranges, multipart uploads, and server-side copies.
+It is intended for clients such as rclone; it is not an AWS service.
+
+Create a credential and start the gateway:
 
 ```sh
 cargo run -p streamer-s3-discord -- credential create --can-create-buckets
 cargo run -p streamer-s3-discord -- serve --webhooks-file webhooks.txt
 ```
 
-See the [`streamer-s3-discord` README](crates/streamer-s3-discord/README.md) for the rclone config and
-credential grant commands.
+Configure rclone with the access and secret keys printed by the first command:
+
+```ini
+[streamer]
+type = s3
+provider = Other
+access_key_id = ACCESS_KEY
+secret_access_key = SECRET_KEY
+endpoint = http://localhost:8080
+region = us-east-1
+force_path_style = true
+```
+
+Normal rclone operations such as `mkdir`, `copy`, `sync`, `check`, `ls`,
+`moveto`, `delete`, and `purge` work against this remote.
+
+### Mount Discord webhook storage as a network disk via rclone
+
+Once the `streamer` remote above is configured, create a bucket and mount it:
+
+```sh
+rclone mkdir streamer:storage
+mkdir -p ~/mnt/discord-storage
+rclone mount streamer:storage ~/mnt/discord-storage --vfs-cache-mode writes
+```
+
+Files written under `~/mnt/discord-storage` are encrypted and stored as Discord
+webhook attachments. Keep `rclone mount` running while the disk is mounted.
+FUSE support is required (`macFUSE` on macOS or FUSE on Linux); Windows can use
+WinFsp. `--vfs-cache-mode writes` lets applications use ordinary file operations
+even though the underlying storage is object-based.
+
+See the [`streamer-s3-discord` README](crates/streamer-s3-discord/README.md) for
+credential grants, proxy configuration, and the complete list of tested rclone
+operations.
 
 ## Build with Nix
 
-A flake is provided; the package builds the whole workspace with no system
-dependencies (vendored SQLite, rustls).
+A flake is provided with one package per executable flavor. Each package builds
+only its selected binary and has no system SQLite/OpenSSL dependency (vendored
+SQLite, rustls).
 
 ```sh
 nix build              # -> ./result/bin/streamer-files-discord
