@@ -176,6 +176,9 @@ impl S3Storage {
         if range.is_empty() {
             return StreamingBlob::wrap(stream::empty::<Result<Bytes, io::Error>>());
         }
+        // The S3 body is pull-based, while StreamDriver uses a Sink to preserve
+        // prefetch under backpressure. This bridge may hold one frame outside
+        // FrameBudget and stays local because the adapter is intentionally tiny.
         let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Bytes, io::Error>>(1);
         let segments = object.segments.clone();
         let backend = self.download_backend.clone();

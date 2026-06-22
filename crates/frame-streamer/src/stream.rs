@@ -521,8 +521,20 @@ impl StreamSession {
     }
 }
 
-/// Owns both halves of the pipeline, so input keeps progressing while output
-/// is backpressured. No task or intermediate channel is required.
+/// Owns both halves of the core pipeline, so input keeps progressing while
+/// output is backpressured, without a task or channel inside `frame-streamer`.
+///
+/// The driver preserves four invariants:
+/// - authorized downloads and prefetched URL tickets keep being polled until
+///   the granted frame window is full, even while the sink is not ready;
+/// - only the front object's frames are emitted, preserving object order;
+/// - a frame remains covered by [`FrameBudget`] until a ready sink is selected;
+/// - dropping the driver drops its in-flight futures and returns its permits.
+///
+/// The permit is released during the synchronous handoff to a sink that
+/// returned ready. After `start_send` succeeds, the sink owns the frame. An
+/// adapter such as a bounded HTTP channel may therefore retain memory in
+/// addition to the frame window.
 pub struct StreamDriver<S> {
     session: StreamSession,
     output: Pin<Box<S>>,
@@ -582,7 +594,7 @@ mod tests {
     use aes_gcm::{Aes256Gcm, Nonce};
     use std::io;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::Context;
     use std::time::Duration;
 
@@ -742,6 +754,79 @@ mod tests {
         }
     }
 
+    struct ControlledOutput {
+        ready: Arc<AtomicBool>,
+        frames: Arc<Mutex<Vec<Bytes>>>,
+    }
+
+    impl Sink<Bytes> for ControlledOutput {
+        type Error = io::Error;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            if self.ready.load(Ordering::Relaxed) {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn start_send(self: Pin<&mut Self>, frame: Bytes) -> Result<(), Self::Error> {
+            self.frames.lock().unwrap().push(frame);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct DisconnectedOutput;
+
+    impl Sink<Bytes> for DisconnectedOutput {
+        type Error = io::Error;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "client disconnected",
+            )))
+        }
+
+        fn start_send(self: Pin<&mut Self>, _frame: Bytes) -> Result<(), Self::Error> {
+            unreachable!()
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
     #[tokio::test]
     async fn emits_frames_in_object_order() {
         let backend = Arc::new(TestBackend {
@@ -811,26 +896,91 @@ mod tests {
     }
 
     #[test]
-    fn fills_window_while_output_is_backpressured() {
+    fn fills_exactly_the_budget_while_output_is_backpressured() {
         let backend = Arc::new(TestBackend {
             block_first: false,
             ..Default::default()
         });
+        let budget = FrameBudget::new(3).unwrap();
         let session = StreamSession::new(
-            objects(&[2, 2]),
+            objects(&[3, 3]),
             backend,
-            request(0..4),
-            FrameBudget::new(4).unwrap(),
-            config(4, 0),
+            request(0..6),
+            budget.clone(),
+            config(3, 0),
         )
         .unwrap();
         let mut driver = session.pipe_into(BlockedOutput);
         let mut cx = Context::from_waker(noop_waker_ref());
 
+        for _ in 0..8 {
+            assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
+        }
+
+        assert_eq!(driver.session.buffered_frames(), 3);
+        assert_eq!(driver.session.plans()[0].authorized_frames(), 3);
+        assert_eq!(budget.available(), 0);
+    }
+
+    #[tokio::test]
+    async fn resuming_output_preserves_order_and_refills_the_window() {
+        let session = StreamSession::new(
+            objects(&[3, 2]),
+            Arc::new(TestBackend::default()),
+            request(0..5),
+            FrameBudget::new(2).unwrap(),
+            config(2, 0),
+        )
+        .unwrap();
+        let ready = Arc::new(AtomicBool::new(false));
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let output = ControlledOutput {
+            ready: ready.clone(),
+            frames: frames.clone(),
+        };
+        let mut driver = session.pipe_into(output);
+        let mut cx = Context::from_waker(noop_waker_ref());
+
         assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
         assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
-        assert_eq!(driver.session.plans()[0].buffered_frames(), 2);
-        assert_eq!(driver.session.plans()[1].buffered_frames(), 2);
+        assert_eq!(driver.session.buffered_frames(), 2);
+
+        ready.store(true, Ordering::Relaxed);
+        driver.await.unwrap();
+
+        let frames = frames.lock().unwrap();
+        let text: Vec<_> = frames.iter().map(|frame| &frame[..]).collect();
+        assert_eq!(
+            text,
+            [
+                b"object-0:0",
+                b"object-0:1",
+                b"object-0:2",
+                b"object-1:0",
+                b"object-1:1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnected_output_returns_all_budget_permits() {
+        let budget = FrameBudget::new(3).unwrap();
+        let session = StreamSession::new(
+            objects(&[3]),
+            Arc::new(TestBackend::default()),
+            request(0..3),
+            budget.clone(),
+            config(3, 0),
+        )
+        .unwrap();
+
+        let error = session.pipe_into(DisconnectedOutput).await.unwrap_err();
+
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(budget.available(), 3);
     }
 
     #[test]

@@ -29,7 +29,15 @@ session and its output. It keeps polling every URL ticket and authorized
 download while the sink is backpressured, until the frame window is full. A
 frame leaves the front object's buffer only after `Sink::poll_ready` succeeds.
 This keeps head-of-line ordering explicit without channels, detached tasks,
-global frame slots, or a separate action queue.
+global frame slots, or a separate action queue inside `frame-streamer`.
+
+`FrameBudget` accounts for authorized frames until the driver hands one to a
+sink that reported ready. The permit is released during that synchronous
+handoff; after `Sink::start_send` succeeds, the sink owns the frame. A transport
+adapter may therefore retain additional bounded memory. The HTTP gateways
+deliberately use a one-slot channel for this push-to-pull boundary, so each
+response may retain one extra frame outside the shared frame budget. Dropping
+the driver cancels its URL and download futures and returns all of its permits.
 
 The scheduler, sizing policy, request and budget know only frames. `ByteStream`
 is the only conversion boundary: output rates use plaintext payload bytes,

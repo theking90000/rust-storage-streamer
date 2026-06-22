@@ -266,6 +266,9 @@ async fn download_file(
         state.stream_config,
     )
     .map_err(ApiError::internal)?;
+    // Hyper pulls response bodies, while StreamDriver pushes into a Sink so it
+    // can keep prefetching under backpressure. This one-slot bridge may retain
+    // one frame beyond FrameBudget; keeping it here makes that boundary explicit.
     let (sender, receiver) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, io::Error>>(1);
     let error_sender = sender.clone();
     let output = sink::unfold(sender, |sender, bytes| async move {
