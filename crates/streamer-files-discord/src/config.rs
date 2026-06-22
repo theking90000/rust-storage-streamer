@@ -150,7 +150,7 @@ impl Partial {
             target_rate: Some(60_000_000.0),
             object_rate: Some(60_000_000.0),
             data_ttfb_ms: Some(100),
-            url_latency_ms: Some(0),
+            url_latency_ms: Some(400),
             frame_budget: Some(415),
         }
     }

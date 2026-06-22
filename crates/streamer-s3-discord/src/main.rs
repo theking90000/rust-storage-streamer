@@ -42,7 +42,7 @@ enum Command {
         object_rate: f64,
         #[arg(long, env = "STREAMER_DATA_TTFB_MS", default_value_t = 100)]
         data_ttfb_ms: u64,
-        #[arg(long, env = "STREAMER_URL_LATENCY_MS", default_value_t = 0)]
+        #[arg(long, env = "STREAMER_URL_LATENCY_MS", default_value_t = 400)]
         url_latency_ms: u64,
         #[arg(long, env = "STREAMER_FRAME_BUDGET", default_value_t = 415)]
         frame_budget: usize,
