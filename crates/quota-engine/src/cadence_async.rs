@@ -208,6 +208,45 @@ mod tests {
         ))
     }
 
+    fn tiny_lane(key: String, now: Instant) -> Resource<String> {
+        Resource::new(
+            key,
+            vec![
+                Bucket::new("webhook", 1, 20.0, 0, now),
+                Bucket::new("channel", 1, 20.0, 0, now),
+            ],
+        )
+    }
+
+    fn tiny_egress(key: String, now: Instant) -> Resource<String> {
+        Resource::new(
+            key,
+            vec![
+                Bucket::new("ip", 1, 20.0, 0, now),
+                Bucket::new("global", 1, 20.0, 0, now),
+            ],
+        )
+    }
+
+    fn congested_handle(lanes: usize, egresses: usize) -> QuotaHandle<String> {
+        let now = Instant::now();
+        QuotaHandle::new(QuotaEngine::new(
+            vec![],
+            vec![
+                Pool::new(
+                    (0..lanes)
+                        .map(|i| tiny_lane(format!("w{i}"), now))
+                        .collect(),
+                ),
+                Pool::new(
+                    (0..egresses)
+                        .map(|i| tiny_egress(format!("ip{i}"), now))
+                        .collect(),
+                ),
+            ],
+        ))
+    }
+
     fn prep_delay(i: usize) -> Duration {
         Duration::from_millis(5 + ((i * 37) % 36) as u64)
     }
@@ -264,6 +303,54 @@ mod tests {
                 .reserve(&[], near_deadline(), Duration::from_secs(10))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn reserve_refuses_when_allocation_backlog_exceeds_deadline() {
+        let handle = congested_handle(1, 1);
+        let deadline = Instant::now() + Duration::from_millis(75);
+        let _r0 = handle
+            .reserve(&[Pin::Free, Pin::Free], deadline, Duration::from_secs(1))
+            .unwrap();
+        let _r1 = handle
+            .reserve(&[Pin::Free, Pin::Free], deadline, Duration::from_secs(1))
+            .unwrap();
+
+        assert!(
+            handle
+                .reserve(&[Pin::Free, Pin::Free], deadline, Duration::from_secs(1))
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_blocks_admitted_reservations_on_egress_bottleneck() {
+        let handle = congested_handle(2, 1);
+        let deadline = Instant::now() + Duration::from_millis(200);
+        let mut r0 = handle
+            .reserve(&[Pin::Free, Pin::Free], deadline, Duration::from_secs(1))
+            .unwrap();
+        let mut r1 = handle
+            .reserve(&[Pin::Free, Pin::Free], deadline, Duration::from_secs(1))
+            .unwrap();
+        let mut r2 = handle
+            .reserve(&[Pin::Free, Pin::Free], deadline, Duration::from_secs(1))
+            .unwrap();
+
+        assert_eq!(r0.picks, vec!["w0".to_owned(), "ip0".to_owned()]);
+        assert_eq!(r1.picks, vec!["w1".to_owned(), "ip0".to_owned()]);
+
+        let start = Instant::now();
+        handle.commit(&mut r0).await;
+        assert!(start.elapsed() < Duration::from_millis(25));
+
+        let start = Instant::now();
+        handle.commit(&mut r1).await;
+        assert!(start.elapsed() >= Duration::from_millis(40));
+
+        let start = Instant::now();
+        handle.commit(&mut r2).await;
+        assert!(start.elapsed() >= Duration::from_millis(40));
     }
 
     #[tokio::test]
