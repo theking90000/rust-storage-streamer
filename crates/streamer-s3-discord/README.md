@@ -26,10 +26,11 @@ Use `--database-url` or `STREAMER_DATABASE_URL` to select another catalog.
 ```sh
 cargo run -p streamer-s3-discord -- serve --webhooks-file webhooks.txt
 
-# Optional: route Discord API traffic through one proxy
+# Optional: route Discord API traffic through one or more proxies
 cargo run -p streamer-s3-discord -- serve \
   --webhooks-file webhooks.txt \
-  --proxy-url socks5h://127.0.0.1:25344
+  --proxy-url socks5h://127.0.0.1:25344 \
+  --proxy-url socks5h://127.0.0.1:25345
 ```
 
 The server defaults to `0.0.0.0:8080`, region `us-east-1`, and a 20 GiB object

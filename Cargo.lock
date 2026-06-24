@@ -603,6 +603,7 @@ dependencies = [
  "dashmap",
  "frame-streamer",
  "futures-util",
+ "quota-engine",
  "reqwest",
  "serde",
  "serde_json",

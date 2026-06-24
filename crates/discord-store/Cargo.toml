@@ -14,6 +14,7 @@ serde.workspace = true
 serde_json.workspace = true
 dashmap.workspace = true
 reqwest.workspace = true
+quota-engine = { path = "../quota-engine" }
 
 [dev-dependencies]
 axum.workspace = true

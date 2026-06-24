@@ -21,8 +21,7 @@ async fn main() -> Result<(), BoxError> {
             cfg.webhooks_file.display()
         )));
     }
-    let storage =
-        discord_store::create_with_proxy(webhooks, cfg.frame_size, cfg.proxy_url.as_deref())?;
+    let storage = discord_store::create_with_proxies(webhooks, cfg.frame_size, &cfg.proxy_urls)?;
     let frames_per_object = storage.upload.max_frames_per_segment();
 
     let catalog = Catalog::connect(&cfg.database_url).await?;

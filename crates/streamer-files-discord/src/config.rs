@@ -15,7 +15,7 @@ pub struct Config {
     pub bind: String,
     pub database_url: String,
     pub webhooks_file: PathBuf,
-    pub proxy_url: Option<String>,
+    pub proxy_urls: Vec<String>,
     pub frame_size: usize,
     pub max_file_size: u64,
     pub target_rate: f64,
@@ -32,6 +32,7 @@ struct Partial {
     bind: Option<String>,
     database_url: Option<String>,
     webhooks_file: Option<PathBuf>,
+    proxy_urls: Option<Vec<String>>,
     proxy_url: Option<String>,
     frame_size: Option<usize>,
     max_file_size: Option<u64>,
@@ -57,8 +58,8 @@ struct Cli {
     database_url: Option<String>,
     #[arg(long)]
     webhooks_file: Option<PathBuf>,
-    #[arg(long)]
-    proxy_url: Option<String>,
+    #[arg(long = "proxy-url")]
+    proxy_url: Vec<String>,
     #[arg(long)]
     frame_size: Option<usize>,
     #[arg(long)]
@@ -81,7 +82,8 @@ impl Cli {
             bind: self.bind,
             database_url: self.database_url,
             webhooks_file: self.webhooks_file,
-            proxy_url: self.proxy_url,
+            proxy_urls: (!self.proxy_url.is_empty()).then_some(self.proxy_url),
+            proxy_url: None,
             frame_size: self.frame_size,
             max_file_size: self.max_file_size,
             target_rate: self.target_rate,
@@ -101,7 +103,8 @@ impl Partial {
             bind: env_str("STREAMER_BIND"),
             database_url: env_str("STREAMER_DATABASE_URL"),
             webhooks_file: env_str("DISCORD_WEBHOOKS_FILE").map(PathBuf::from),
-            proxy_url: env_str("DISCORD_PROXY_URL"),
+            proxy_urls: env_list("DISCORD_PROXY_URL"),
+            proxy_url: None,
             frame_size: env_parse("STREAMER_FRAME_SIZE"),
             max_file_size: env_parse("FILES_MAX_FILE_SIZE"),
             target_rate: env_parse("STREAMER_TARGET_RATE"),
@@ -125,6 +128,7 @@ impl Partial {
             bind: self.bind.or(other.bind),
             database_url: self.database_url.or(other.database_url),
             webhooks_file: self.webhooks_file.or(other.webhooks_file),
+            proxy_urls: self.proxy_urls.or(other.proxy_urls),
             proxy_url: self.proxy_url.or(other.proxy_url),
             frame_size: self.frame_size.or(other.frame_size),
             max_file_size: self.max_file_size.or(other.max_file_size),
@@ -144,6 +148,7 @@ impl Partial {
             bind: Some("0.0.0.0:8080".to_owned()),
             database_url: Some("sqlite:catalog.db?mode=rwc".to_owned()),
             webhooks_file: None,
+            proxy_urls: None,
             proxy_url: None,
             frame_size: Some(1 << 16),
             max_file_size: Some(20 * 1024 * 1024 * 1024),
@@ -170,6 +175,10 @@ pub fn resolve() -> Result<Config, BoxError> {
     };
 
     let merged = env.or(cli.into_partial()).or(toml).or(Partial::defaults());
+    let proxy_urls = merged
+        .proxy_urls
+        .or_else(|| merged.proxy_url.map(|proxy_url| vec![proxy_url]))
+        .unwrap_or_default();
 
     // `defaults()` supplies every field except `webhooks_file`, so the rest unwrap safely.
     Ok(Config {
@@ -178,7 +187,7 @@ pub fn resolve() -> Result<Config, BoxError> {
                 "webhooks_file is required (DISCORD_WEBHOOKS_FILE, --webhooks-file, or webhooks_file in TOML)",
             )
         })?,
-        proxy_url: merged.proxy_url,
+        proxy_urls,
         bind: merged.bind.unwrap(),
         database_url: merged.database_url.unwrap(),
         frame_size: merged.frame_size.unwrap(),
@@ -193,6 +202,20 @@ pub fn resolve() -> Result<Config, BoxError> {
 
 fn env_str(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|value| !value.is_empty())
+}
+
+fn env_list(key: &str) -> Option<Vec<String>> {
+    env_str(key).and_then(|value| split_list(&value))
+}
+
+fn split_list(value: &str) -> Option<Vec<String>> {
+    let values: Vec<_> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect();
+    (!values.is_empty()).then_some(values)
 }
 
 fn env_parse<T: FromStr>(key: &str) -> Option<T> {
@@ -223,5 +246,32 @@ mod tests {
         let merged = env.or(cli).or(toml).or(Partial::defaults());
         assert_eq!(merged.bind.unwrap(), "env");
         assert_eq!(merged.frame_size.unwrap(), 42);
+    }
+
+    #[test]
+    fn cli_proxy_url_is_repeatable() {
+        let cli = Cli::try_parse_from(["cmd", "--proxy-url", "a", "--proxy-url", "b"]).unwrap();
+        assert_eq!(cli.into_partial().proxy_urls.unwrap(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn env_proxy_url_accepts_comma_separated_values() {
+        assert_eq!(
+            split_list("http://a, socks5h://b ,,").unwrap(),
+            vec!["http://a", "socks5h://b"]
+        );
+    }
+
+    #[test]
+    fn toml_accepts_proxy_urls_and_legacy_proxy_url() {
+        let list: Partial = toml::from_str("proxy_urls = [\"a\", \"b\"]").unwrap();
+        assert_eq!(list.proxy_urls.unwrap(), vec!["a", "b"]);
+
+        let legacy: Partial = toml::from_str("proxy_url = \"a\"").unwrap();
+        let proxy_urls = legacy
+            .proxy_urls
+            .or_else(|| legacy.proxy_url.map(|proxy_url| vec![proxy_url]))
+            .unwrap_or_default();
+        assert_eq!(proxy_urls, vec!["a"]);
     }
 }

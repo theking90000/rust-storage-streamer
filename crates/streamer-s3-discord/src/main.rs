@@ -30,8 +30,8 @@ enum Command {
         bind: String,
         #[arg(long, env = "DISCORD_WEBHOOKS_FILE")]
         webhooks_file: PathBuf,
-        #[arg(long, env = "DISCORD_PROXY_URL")]
-        proxy_url: Option<String>,
+        #[arg(long = "proxy-url", env = "DISCORD_PROXY_URL", value_delimiter = ',')]
+        proxy_url: Vec<String>,
         #[arg(long, env = "STREAMER_FRAME_SIZE", default_value_t = 1 << 16)]
         frame_size: usize,
         #[arg(long, env = "S3_MAX_OBJECT_SIZE", default_value_t = 20 * 1024 * 1024 * 1024_u64)]
@@ -137,7 +137,7 @@ async fn serve(
     catalog: Catalog,
     bind: String,
     webhooks_file: PathBuf,
-    proxy_url: Option<String>,
+    proxy_urls: Vec<String>,
     frame_size: usize,
     max_object_size: u64,
     target_rate: f64,
@@ -150,7 +150,7 @@ async fn serve(
     if webhooks.is_empty() {
         return Err(format!("{} contained no webhooks", webhooks_file.display()).into());
     }
-    let storage = discord_store::create_with_proxy(webhooks, frame_size, proxy_url.as_deref())?;
+    let storage = discord_store::create_with_proxies(webhooks, frame_size, &proxy_urls)?;
     let frames_per_object = storage.upload.max_frames_per_segment();
     let rate = ByteRate::new(target_rate)?;
     let stream_config = ByteStreamConfig::new(

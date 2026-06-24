@@ -9,10 +9,11 @@ with the [`files-gateway`](../files-gateway/README.md) Axum component.
 # webhooks.txt: one `<id>:<token>` per line (blank lines and `#` comments ignored)
 cargo run -p streamer-files-discord -- --webhooks-file webhooks.txt
 
-# Optional: route Discord API traffic through one proxy
+# Optional: route Discord API traffic through one or more proxies
 cargo run -p streamer-files-discord -- \
   --webhooks-file webhooks.txt \
-  --proxy-url socks5h://127.0.0.1:25344
+  --proxy-url socks5h://127.0.0.1:25344 \
+  --proxy-url socks5h://127.0.0.1:25345
 ```
 
 ## Configuration
@@ -26,8 +27,9 @@ Three layers, precedence **env > CLI > TOML**:
 - CLI: matching `--bind`, `--webhooks-file`, … flags plus `--config <file>`.
 - TOML: same field names as keys (see `FILES_CONFIG` / `--config`).
 
-`webhooks_file` is the only required field. `proxy_url` accepts `http://`,
+`webhooks_file` is the only required field. `proxy_urls` accepts `http://`,
 `https://`, `socks5://`, and `socks5h://`; `socks5h` resolves DNS through the
-proxy. `frame_size` MUST match the value
+proxy. `DISCORD_PROXY_URL` accepts a comma-separated list, and legacy TOML
+`proxy_url = "..."` still works. `frame_size` MUST match the value
 used by clients; the streaming-rate fields are calibration knobs for real
 Discord throughput.

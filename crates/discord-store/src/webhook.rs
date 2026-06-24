@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64};
 
 use frame_streamer::BoxError;
 
@@ -31,27 +30,6 @@ pub async fn load_webhooks(path: impl AsRef<Path>) -> Result<Vec<Webhook>, BoxEr
         });
     }
     Ok(out)
-}
-
-/// Runtime state for one webhook in the registry.
-pub(crate) struct WebhookSlot {
-    pub id: String,
-    pub token: String,
-    /// Number of uploads dispatched through this webhook (drives uniform spread).
-    pub used: AtomicU64,
-    /// Set once the webhook is detected as deleted / unauthorized.
-    pub dead: AtomicBool,
-}
-
-impl WebhookSlot {
-    pub fn new(webhook: Webhook) -> Self {
-        Self {
-            id: webhook.id,
-            token: webhook.token,
-            used: AtomicU64::new(0),
-            dead: AtomicBool::new(false),
-        }
-    }
 }
 
 /// Parts of a `discord://{id}/{token}/{message_id}` object URI.
