@@ -43,12 +43,24 @@ impl Bucket {
     /// `safety` reserves headroom (effective capacity C - safety) to absorb the
     /// jitter in *when* the server actually consumes the token. This is the only
     /// knob the jitter corrector touches later.
-    pub fn new(label: &'static str, capacity: u32, refill_per_sec: f64, safety: u32, now: Instant) -> Self {
+    pub fn new(
+        label: &'static str,
+        capacity: u32,
+        refill_per_sec: f64,
+        safety: u32,
+        now: Instant,
+    ) -> Self {
         assert!(refill_per_sec > 0.0, "refill must be > 0");
         let interval = Duration::from_secs_f64(1.0 / refill_per_sec);
         let c_eff = capacity.saturating_sub(safety).max(1);
         let tolerance = interval.mul_f64((c_eff - 1) as f64);
-        Self { label, interval, tolerance, tat: now, rtat: now }
+        Self {
+            label,
+            interval,
+            tolerance,
+            tat: now,
+            rtat: now,
+        }
     }
 
     fn slack_of(&self, horizon: Instant, now: Instant) -> i128 {
@@ -74,7 +86,9 @@ impl Bucket {
     /// Roll back one admitted-but-cancelled reservation (best-effort, on the
     /// client-side allocation horizon only -- never touches the committed `tat`).
     fn release_reserve(&mut self) {
-        self.rtat = (self.rtat.checked_sub(self.interval)).unwrap_or(self.rtat).max(self.tat);
+        self.rtat = (self.rtat.checked_sub(self.interval))
+            .unwrap_or(self.rtat)
+            .max(self.tat);
     }
 
     /// Authorize a commit at `t`: advance the real rate horizon, and keep the
@@ -106,14 +120,26 @@ pub struct Resource<K> {
 
 impl<K> Resource<K> {
     pub fn new(key: K, buckets: Vec<Bucket>) -> Self {
-        Self { key, alive: true, buckets }
+        Self {
+            key,
+            alive: true,
+            buckets,
+        }
     }
     /// Conjunction => gated by the most-constraining bucket, on either horizon.
     fn reserve_slack(&self, now: Instant) -> i128 {
-        self.buckets.iter().map(|b| b.reserve_slack(now)).max().unwrap_or(i128::MIN)
+        self.buckets
+            .iter()
+            .map(|b| b.reserve_slack(now))
+            .max()
+            .unwrap_or(i128::MIN)
     }
     fn commit_slack(&self, now: Instant) -> i128 {
-        self.buckets.iter().map(|b| b.commit_slack(now)).max().unwrap_or(i128::MIN)
+        self.buckets
+            .iter()
+            .map(|b| b.commit_slack(now))
+            .max()
+            .unwrap_or(i128::MIN)
     }
     fn advance_reserve(&mut self, t: Instant) {
         for b in &mut self.buckets {
@@ -190,7 +216,12 @@ impl<K: PartialEq + Clone> QuotaEngine<K> {
     /// against its deadline; refusal spends nothing (monotone backpressure).
     pub fn peek_reserve(&self, demand: &[Pin<K>], now: Instant) -> Option<(Vec<usize>, Instant)> {
         assert_eq!(demand.len(), self.pools.len(), "one pin per pool");
-        let mut overall = self.shared.iter().map(|b| b.reserve_slack(now)).max().unwrap_or(i128::MIN);
+        let mut overall = self
+            .shared
+            .iter()
+            .map(|b| b.reserve_slack(now))
+            .max()
+            .unwrap_or(i128::MIN);
         let mut idxs = Vec::with_capacity(self.pools.len());
         for (pool, pin) in self.pools.iter().zip(demand) {
             let i = pool.resolve(pin, now)?;
@@ -220,7 +251,12 @@ impl<K: PartialEq + Clone> QuotaEngine<K> {
     /// from the live COMMIT horizon (tat) -- re-evaluated on every call, so a
     /// `reconcile` that arrived since admission is reflected here. Non-mutating.
     pub fn earliest_commit(&self, idxs: &[usize], now: Instant) -> Instant {
-        let mut overall = self.shared.iter().map(|b| b.commit_slack(now)).max().unwrap_or(i128::MIN);
+        let mut overall = self
+            .shared
+            .iter()
+            .map(|b| b.commit_slack(now))
+            .max()
+            .unwrap_or(i128::MIN);
         for (pool, &i) in self.pools.iter().zip(idxs) {
             overall = overall.max(pool.resources[i].commit_slack(now));
         }
@@ -239,18 +275,6 @@ impl<K: PartialEq + Clone> QuotaEngine<K> {
         }
     }
 
-    /// Cancel an admitted-but-never-committed reservation: roll back the
-    /// allocation horizon only. The committed `tat` is never touched, so this
-    /// stays sound under concurrency (it only ever frees admission headroom).
-    pub fn release(&mut self, idxs: &[usize]) {
-        for b in &mut self.shared {
-            b.release_reserve();
-        }
-        for (pool, &i) in self.pools.iter_mut().zip(idxs) {
-            pool.resources[i].release_reserve();
-        }
-    }
-
     /// Convenience: admit immediately (allocation horizon only). Used by callers
     /// and tests that don't drive the explicit commit gate.
     pub fn claim(&mut self, demand: &[Pin<K>], now: Instant) -> Option<Allocation<K>> {
@@ -260,8 +284,20 @@ impl<K: PartialEq + Clone> QuotaEngine<K> {
     }
 
     /// Feed back an observed rate-limit header for one bucket of one resource.
-    pub fn reconcile(&mut self, pool: usize, key: &K, bucket: &'static str, remaining: u32, capacity: u32, now: Instant) {
-        if let Some(r) = self.pools[pool].resources.iter_mut().find(|r| &r.key == key) {
+    pub fn reconcile(
+        &mut self,
+        pool: usize,
+        key: &K,
+        bucket: &'static str,
+        remaining: u32,
+        capacity: u32,
+        now: Instant,
+    ) {
+        if let Some(r) = self.pools[pool]
+            .resources
+            .iter_mut()
+            .find(|r| &r.key == key)
+        {
             for b in r.buckets.iter_mut().filter(|b| b.label == bucket) {
                 b.reconcile(remaining, capacity, now);
             }
@@ -269,8 +305,26 @@ impl<K: PartialEq + Clone> QuotaEngine<K> {
     }
 
     pub fn set_alive(&mut self, pool: usize, key: &K, alive: bool) {
-        if let Some(r) = self.pools[pool].resources.iter_mut().find(|r| &r.key == key) {
+        if let Some(r) = self.pools[pool]
+            .resources
+            .iter_mut()
+            .find(|r| &r.key == key)
+        {
             r.alive = alive;
+        }
+    }
+}
+
+impl<K> QuotaEngine<K> {
+    /// Cancel an admitted-but-never-committed reservation: roll back the
+    /// allocation horizon only. The committed `tat` is never touched, so this
+    /// stays sound under concurrency (it only ever frees admission headroom).
+    pub fn release(&mut self, idxs: &[usize]) {
+        for b in &mut self.shared {
+            b.release_reserve();
+        }
+        for (pool, &i) in self.pools.iter_mut().zip(idxs) {
+            pool.resources[i].release_reserve();
         }
     }
 }
@@ -286,6 +340,30 @@ mod tests {
             vec![
                 Bucket::new("webhook", 5, 2.5, 0, now),
                 Bucket::new("channel", 30, 0.5, 0, now),
+            ],
+        )
+    }
+
+    fn egress(key: &str, now: Instant) -> Resource<String> {
+        Resource::new(
+            key.to_owned(),
+            vec![
+                Bucket::new("ip", 10000, 1000.0 / 60.0, 0, now),
+                Bucket::new("global", 50, 50.0, 0, now),
+            ],
+        )
+    }
+
+    fn matrix_engine(lanes: usize, egresses: usize, now: Instant) -> QuotaEngine<String> {
+        QuotaEngine::new(
+            vec![],
+            vec![
+                Pool::new((0..lanes).map(|i| lane(&format!("w{i}"), now)).collect()),
+                Pool::new(
+                    (0..egresses)
+                        .map(|i| egress(&format!("ip{i}"), now))
+                        .collect(),
+                ),
             ],
         )
     }
@@ -329,15 +407,23 @@ mod tests {
         let pool = Pool::new(vec![lane("a", t0), lane("b", t0)]);
         let mut e = QuotaEngine::new(vec![], vec![pool]);
         // Two identical idle lanes => strict alternation (round-robin).
-        let picks: Vec<_> = (0..4).map(|_| e.claim(&[Pin::Free], t0).unwrap().picks[0].clone()).collect();
+        let picks: Vec<_> = (0..4)
+            .map(|_| e.claim(&[Pin::Free], t0).unwrap().picks[0].clone())
+            .collect();
         assert_eq!(picks, vec!["a", "b", "a", "b"]);
     }
 
     #[test]
     fn capacity_weighted_when_lanes_differ() {
         let t0 = Instant::now();
-        let weak = Resource::new("weak".to_owned(), vec![Bucket::new("webhook", 5, 2.5, 0, t0)]);
-        let strong = Resource::new("strong".to_owned(), vec![Bucket::new("webhook", 10, 5.0, 0, t0)]);
+        let weak = Resource::new(
+            "weak".to_owned(),
+            vec![Bucket::new("webhook", 5, 2.5, 0, t0)],
+        );
+        let strong = Resource::new(
+            "strong".to_owned(),
+            vec![Bucket::new("webhook", 10, 5.0, 0, t0)],
+        );
         let mut e = QuotaEngine::new(vec![], vec![Pool::new(vec![weak, strong])]);
         let mut strong_n = 0;
         for _ in 0..30 {
@@ -365,6 +451,46 @@ mod tests {
     }
 
     #[test]
+    fn matrix_one_lane_one_egress() {
+        let t0 = Instant::now();
+        let mut e = matrix_engine(1, 1, t0);
+        let mut sends = vec![];
+        for _ in 0..6 {
+            let a = e.claim(&[Pin::Free, Pin::Free], t0).unwrap();
+            assert_eq!(a.picks, vec!["w0".to_owned(), "ip0".to_owned()]);
+            sends.push(ms(a.send_at, t0));
+        }
+        assert_eq!(&sends[..5], &[0, 0, 0, 0, 0]);
+        assert_eq!(sends[5], 400);
+    }
+
+    #[test]
+    fn matrix_many_lanes_and_egresses() {
+        use std::collections::HashSet;
+
+        let t0 = Instant::now();
+        let mut e = matrix_engine(1000, 30, t0);
+        let mut first_1000_lanes = HashSet::new();
+        let mut first_30_egresses = HashSet::new();
+        let mut last = 0;
+
+        for i in 0..1501 {
+            let a = e.claim(&[Pin::Free, Pin::Free], t0).unwrap();
+            if i < 1000 {
+                first_1000_lanes.insert(a.picks[0].clone());
+            }
+            if i < 30 {
+                first_30_egresses.insert(a.picks[1].clone());
+            }
+            last = ms(a.send_at, t0);
+        }
+
+        assert_eq!(first_1000_lanes.len(), 1000);
+        assert_eq!(first_30_egresses.len(), 30);
+        assert_eq!(last, 20);
+    }
+
+    #[test]
     fn reconcile_only_tightens() {
         let t0 = Instant::now();
         let mut e = QuotaEngine::new(vec![], vec![Pool::new(vec![lane("w", t0)])]);
@@ -378,5 +504,23 @@ mod tests {
         e.reconcile(0, &"w".to_owned(), "webhook", 5, 5, t0);
         let still = e.claim(&[Pin::Free], t0).unwrap().send_at;
         assert!(ms(still, t0) >= ms(pushed, t0));
+    }
+
+    #[test]
+    fn reconcile_after_admission_delays_commit_gate() {
+        let t0 = Instant::now();
+        let mut e = QuotaEngine::new(
+            vec![],
+            vec![Pool::new(vec![Resource::new(
+                "w".to_owned(),
+                vec![Bucket::new("webhook", 1, 1.0, 0, t0)],
+            )])],
+        );
+        let (idxs, reserve_at) = e.peek_reserve(&[Pin::Free], t0).unwrap();
+        e.admit(&idxs, reserve_at);
+        assert_eq!(ms(e.earliest_commit(&idxs, t0), t0), 0);
+
+        e.reconcile(0, &"w".to_owned(), "webhook", 0, 5, t0);
+        assert_eq!(ms(e.earliest_commit(&idxs, t0), t0), 5000);
     }
 }
