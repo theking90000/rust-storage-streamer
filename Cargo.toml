@@ -8,6 +8,7 @@ members = [
     "crates/streamer-files-discord",
     "crates/s3-gateway",
     "crates/streamer-s3-discord",
+    "crates/quota-engine",
 ]
 
 [workspace.package]

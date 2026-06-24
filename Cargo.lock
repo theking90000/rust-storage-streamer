@@ -1728,6 +1728,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "quota-engine"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "tokio",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
