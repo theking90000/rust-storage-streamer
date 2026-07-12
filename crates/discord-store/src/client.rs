@@ -19,8 +19,8 @@ pub(crate) const FRAMES_PER_SEGMENT: u64 = 150;
 const DEFAULT_API_BASE: &str = "https://discord.com/api/v10";
 /// Bounded retries for a resolve on transient 429s.
 const RESOLVE_ATTEMPTS: usize = 4;
-const QUOTA_DEADLINE: Duration = Duration::from_secs(30);
-const QUOTA_VALIDITY: Duration = Duration::from_secs(60);
+const QUOTA_DEADLINE: Duration = Duration::from_secs(5);
+const QUOTA_VALIDITY: Duration = Duration::from_secs(10);
 const WEBHOOK_CAPACITY: u32 = 5;
 const CHANNEL_CAPACITY: u32 = 30;
 const IP_CAPACITY: u32 = 10_000;
@@ -101,7 +101,14 @@ impl DiscordCore {
     /// Streams one segment to the least-loaded alive webhook as a chunked
     /// multipart body. The quota commit is held until the final body chunk.
     pub async fn post_attachment(&self, body: UploadByteStream) -> Result<StoredObject, BoxError> {
-        let reservation = self.reserve(&[Pin::Free, Pin::Free])?;
+        println!("posting attachment, reserving quota for webhook and egress");
+        let reservation = self.reserve(&[Pin::Free, Pin::Free]);
+        let reservation= match reservation {
+            Ok(reservation) => {println!("quota reserve succeeded: {:?}", &reservation.picks); reservation},
+            Err(e) => {println!("quota reserve failed: {:?}", e); return Err(BoxError::from(format!("quota reserve failed: {e}"))) }
+        };
+
+
         let webhook_idx = reservation.picks[0];
         let egress_idx = reservation.picks[1];
         let id = self.webhooks[webhook_idx].id.clone();
@@ -302,14 +309,21 @@ fn gate_last_chunk(
     quota: QuotaHandle<usize>,
     mut reservation: Reservation<usize>,
 ) -> UploadByteStream {
+    static INVOCATIONS : std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static START: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+
+    let i = INVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     Box::pin(async_stream::try_stream! {
         let mut last: Option<Bytes> = None;
+        println!("[{:?}] Stream {}: gate_last_chunk: start streaming, holding last chunk",START.elapsed(), i);
         while let Some(chunk) = body.next().await {
             if let Some(previous) = last.replace(chunk?) {
                 yield previous;
             }
         }
+        println!("[{:?}] Stream {}: gate_last_chunk: last chunk held until commit",START.elapsed(), i);
         quota.commit(&mut reservation).await;
+        println!("[{:?}] Stream {}: gate_last_chunk: quota commit done, yielding last chunk",START.elapsed(), i);
         if let Some(last) = last {
             yield last;
         }

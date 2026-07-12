@@ -41,6 +41,7 @@
 <div id="status"></div>
 <progress id="progress" value="0" max="100"></progress>
 <div id="result"></div>
+<div id="log"></div>
 
 <script>
   const SEGMENT_SIZE = ((1 << 16) - 16) * 150; //150* 64KB, matches server default frame_size
@@ -75,25 +76,32 @@
 
     // PUT via XHR so upload.onprogress feeds the live throughput counter.
     function putSegment(url, blob) {
+      const tx = document.createElement("div");
+      document.querySelector("#log").prepend(tx);
+      tx.textContent = `Uploading segment ${url} — 0/${blob.size}`;
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open("PUT", url);
         let last = 0;
         xhr.upload.onprogress = (e) => {
+          tx.textContent = `Uploading segment ${url} — ${e.loaded}/${e.total}`;
           uploadedBytes += e.loaded - last;
           last = e.loaded;
         };
         xhr.onload = () => {
           if (xhr.status >= 200 && xhr.status < 300) {
+            tx.textContent = `Uploaded segment ${url} — ${xhr.status}`;
             uploadedBytes += blob.size - last; // count any bytes progress missed
             resolve();
           } else {
+            tx.textContent = `Failed segment ${url} — ${xhr.status}: ${xhr.responseText}`;
             uploadedBytes -= last; // failed attempt doesn't count
             reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
           }
         };
         xhr.onerror = () => {
           uploadedBytes -= last;
+          tx.textContent = `Network error for segment ${url}`;
           reject(new Error("network error"));
         };
         xhr.send(blob);
@@ -114,7 +122,7 @@
         throw new Error("Create failed: " + (await create.text()));
       const { id } = await create.json();
 
-      const N = 4;
+      const N = 10;
       segments = Math.ceil(f.size / SEGMENT_SIZE);
       const MAX_RETRIES = 3;
 
