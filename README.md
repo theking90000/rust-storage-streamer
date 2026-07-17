@@ -218,6 +218,68 @@ nix run .#streamer-files-cli
 nix develop            # dev shell with rust-analyzer, clippy, rustfmt
 ```
 
+## NixOS module
+
+The flake exports `nixosModules.default`, with independent Files and S3
+services. Add the repository as an input and import the module in the NixOS
+configuration that should run the gateways:
+
+```nix
+inputs.rust-storage-streamer = {
+  url = "github:theking90000/rust-storage-streamer";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+
+imports = [
+  inputs.rust-storage-streamer.nixosModules.default
+];
+
+services.rust-storage-streamer.files = {
+  enable = true;
+  webhooksFile = "/run/secrets/discord-webhooks";
+};
+
+services.rust-storage-streamer.s3 = {
+  enable = true;
+  webhooksFile = "/run/secrets/discord-webhooks";
+};
+```
+
+Files listens on `127.0.0.1:8080` and S3 on `127.0.0.1:8081` by default.
+`listenAddress`, `port`, `databaseUrl`, `stateDirectory`, `proxyUrls`, and
+`extraArgs` can be overridden independently for each service. The firewall is
+left closed unless `openFirewall = true` is set.
+
+`webhooksFile` must point to a file available at runtime. systemd loads it as a
+credential, so its contents are not copied into the Nix store and the service
+reads the protected `%d/webhooks` copy. TLS, reverse proxying, backups, and
+creation of the source secret remain the responsibility of the consuming
+configuration.
+
+When the S3 service is enabled, its executable is available on the system PATH.
+Manage credentials as the service user so the command can access the protected
+catalog:
+
+```sh
+database='sqlite:///var/lib/rust-storage-streamer-s3/s3-catalog.db?mode=rwc'
+
+sudo -u rust-storage-streamer-s3 \
+  streamer-s3-discord --database-url "$database" \
+  credential create --can-create-buckets
+
+sudo -u rust-storage-streamer-s3 \
+  streamer-s3-discord --database-url "$database" \
+  credential grant ACCESS_KEY bucket
+
+sudo -u rust-storage-streamer-s3 \
+  streamer-s3-discord --database-url "$database" \
+  credential grant ACCESS_KEY bucket --read-only
+
+sudo -u rust-storage-streamer-s3 \
+  streamer-s3-discord --database-url "$database" \
+  credential revoke ACCESS_KEY
+```
+
 ## Development
 
 ```sh
